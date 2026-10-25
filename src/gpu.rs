@@ -1976,6 +1976,10 @@ pub struct Sheet {
     /// Where there is glass in its piece, with a margin for frosting —in its
     /// own logical pixels—, and the box of the capture that is on the way.
     pub glass_box: Option<[i32; 4]>,
+    /// The parts of that box worth capturing on their own (`lens::capture_parts`): none, the box whole.
+    pub glass_rects: Vec<[i32; 4]>,
+    /// What those were made from, so they are made again only when the glass moves.
+    pub glass_src: Vec<[i32; 4]>,
     pub asked_box: [i32; 4],
     pub capture_asked: std::time::Instant,
     /// The last capture requested after presenting: it sets the pace of the captures.
@@ -2605,7 +2609,7 @@ impl Gpu {
         let (layer_views, layer_group) = Self::make_layers(&self.device, &self.pipeline, self.format, 1, 1, 1);
         let mut l = Sheet {
             id: n.id, frame_no: 0, painted_as: Vec::new(), damage_log: Default::default(), known_as: (0, (0, 0)), kept: None, idle_kept_frames: 0, name: n.name, mhz: n.mhz, scale: n.scale, drives_pace: true, open: true, unseen: false, missed: 0, cleared: false, view: n.view,
-            target: n.target, spare: None, window: n.window, px: (0, 0), uniforms, uniform_group, layer_views, layer_group, layers: 0, idle_layer_frames: 0, blur_rects: Vec::new(), lens: None, own: None, idle_own_frames: 0, wants_lens: false, capture: BackdropCapture::Idle, glass_box: None, asked_box: [0; 4], capture_asked: std::time::Instant::now(), capture_taken: long_ago(), owed_damage: Vec::new(), painted_now: false, painted: None, input_region: vec![[-1, -1, -1, -1]], presented: false, keyboard_mode: None,
+            target: n.target, spare: None, window: n.window, px: (0, 0), uniforms, uniform_group, layer_views, layer_group, layers: 0, idle_layer_frames: 0, blur_rects: Vec::new(), lens: None, own: None, idle_own_frames: 0, wants_lens: false, capture: BackdropCapture::Idle, glass_box: None, glass_rects: Vec::new(), glass_src: Vec::new(), asked_box: [0; 4], capture_asked: std::time::Instant::now(), capture_taken: long_ago(), owed_damage: Vec::new(), painted_now: false, painted: None, input_region: vec![[-1, -1, -1, -1]], presented: false, keyboard_mode: None,
         };
         // Frames of our own where the platform makes them, so the compositor
         // is told which piece of each changed: a swapchain's are handed over
@@ -4057,7 +4061,7 @@ impl Sheet {
         if let Target::Frames(frames) = &mut self.target {
             frames.settle();
         }
-        if self.window.capture_backdrop(bounds, on_change) {
+        if self.window.capture_backdrop(bounds, &self.glass_rects, on_change) {
             self.asked_box = bounds;
             self.capture = if on_change { BackdropCapture::Watching } else { BackdropCapture::AfterPresent };
             self.capture_asked = std::time::Instant::now();

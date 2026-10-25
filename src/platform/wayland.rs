@@ -332,8 +332,8 @@ struct BackdropTarget {
     /// With what opacity the compositor blends its content: a window may not be fully opaque.
     opacity: Mutex<f32>,
     in_flight: std::sync::atomic::AtomicBool,
-    /// The capture on the way, so it can be forgotten.
-    frame: Mutex<Option<ZwlrScreencopyFrameV1>>,
+    /// The captures on the way (one per part of the box), so they can be forgotten.
+    frames: Mutex<Vec<ZwlrScreencopyFrameV1>>,
 }
 
 /// How to know where a surface is on its monitor.
@@ -348,7 +348,7 @@ enum BackdropKind {
 
 impl BackdropTarget {
     fn new(id: u32, output: Option<(wl_output::WlOutput, String)>, kind: BackdropKind) -> Arc<BackdropTarget> {
-        Arc::new(BackdropTarget { id, output: Mutex::new(output), position: Mutex::new(None), size: Mutex::new((0, 0)), kind, last_asked: Mutex::new(None), opacity: Mutex::new(1.0), in_flight: std::sync::atomic::AtomicBool::new(false), frame: Mutex::new(None) })
+        Arc::new(BackdropTarget { id, output: Mutex::new(output), position: Mutex::new(None), size: Mutex::new((0, 0)), kind, last_asked: Mutex::new(None), opacity: Mutex::new(1.0), in_flight: std::sync::atomic::AtomicBool::new(false), frames: Mutex::new(Vec::new()) })
     }
 
     /// On which monitor and where, now. With Hyprland it gets asked, at most
@@ -438,6 +438,32 @@ struct CaptureFor {
     on_change: bool,
     /// What the compositor offers to copy it into: size, stride and format.
     format: Mutex<Option<(u32, u32, u32, wl_shm::Format)>>,
+    /// A capture of several small boxes instead of one big one: which of them this is, and what they share.
+    part: Option<(Arc<Mutex<Parts>>, usize)>,
+}
+
+/// A capture made of several small ones: the glass of a shell is a frame round the screen, and the one box
+/// that holds it all is the whole screen, of which the compositor would read back (and we would upload) twenty
+/// times what is needed. Each part is photographed on its own and copied to where it goes in one buffer
+/// the size of the whole box, which reaches the render as any other capture, with the list of what in it is real.
+struct Parts {
+    /// The whole box, and the parts, logical, `[x, y, width, height]` in the window's coordinates.
+    hull: [i32; 4],
+    rects: Vec<[i32; 4]>,
+    /// The parts that have arrived, in real pixels of the assembled buffer.
+    valid: Vec<[u32; 4]>,
+    /// It has been sent (or failed): what still arrives is forgotten.
+    over: bool,
+}
+
+/// Set when the parts of a capture did not fit together (a size the compositor rounded another way): from
+/// then on the box is captured whole, as it always was.
+static PARTS_BROKEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The assembled buffer of a surface, and its size in real pixels.
+struct Assembled {
+    size: (u32, u32),
+    map: Arc<MappedMemory>,
 }
 
 /// The memory where the compositor leaves a surface's captures. It's
@@ -476,14 +502,24 @@ impl Drop for MappedMemory {
     }
 }
 
+impl CaptureFor {
+    /// Every capture of this surface still on the way is forgotten, this one among them, and a new one may be asked for.
+    fn finish(&self) {
+        for f in self.target.frames.lock().unwrap().drain(..) {
+            f.destroy();
+        }
+        self.target.in_flight.store(false, Ordering::Relaxed);
+    }
+
+    fn failed(&self, e: &State) {
+        let _ = e.to_render.send(ToRender::Backdrop(Box::new(super::Backdrop { sheet: self.target.id, width: 0, height: 0, stride: 0, opacity: 1.0, data: None, rects: Vec::new() })));
+    }
+}
+
 impl Dispatch2<ZwlrScreencopyFrameV1, State> for CaptureFor {
     fn event(&self, e: &mut State, frame: &ZwlrScreencopyFrameV1, ev: zwlr_screencopy_frame_v1::Event, _: &Connection, qh: &QueueHandle<State>) {
         use zwlr_screencopy_frame_v1::Event as E;
-        let finish = |frame: &ZwlrScreencopyFrameV1| {
-            frame.destroy();
-            *self.target.frame.lock().unwrap() = None;
-            self.target.in_flight.store(false, Ordering::Relaxed);
-        };
+        let part = self.part.as_ref().map_or(0, |p| p.1);
         match ev {
             // Only in the usual format: four bytes, blue first, and the buffer
             // in the very format offered (only its colours are read: the
@@ -494,41 +530,101 @@ impl Dispatch2<ZwlrScreencopyFrameV1, State> for CaptureFor {
                 *self.format.lock().unwrap() = Some((width, height, stride, f));
             }
             E::BufferDone => {
-                let (Some(size), Some((_, shm))) = (*self.format.lock().unwrap(), SCREENCOPY.get()) else { return finish(frame) };
-                let id = self.target.id;
-                if e.capture_buffers.get(&id).is_none_or(|f| f.size != size) {
-                    e.capture_buffers.remove(&id);
+                let (Some(size), Some((_, shm))) = (*self.format.lock().unwrap(), SCREENCOPY.get()) else {
+                    self.finish();
+                    return;
+                };
+                let key = (self.target.id, part);
+                if e.capture_buffers.get(&key).is_none_or(|f| f.size != size) {
+                    e.capture_buffers.remove(&key);
                     let len = (size.2 * size.1) as usize;
-                    let Some(fd) = memfd(len) else { return finish(frame) };
+                    let Some(fd) = memfd(len) else { return self.finish() };
                     let ptr = unsafe { libc::mmap(std::ptr::null_mut(), len, libc::PROT_READ | libc::PROT_WRITE, libc::MAP_SHARED, std::os::fd::AsRawFd::as_raw_fd(&fd), 0) };
                     if ptr == libc::MAP_FAILED {
-                        return finish(frame);
+                        return self.finish();
                     }
                     let pool = shm.create_pool(std::os::fd::AsFd::as_fd(&fd), len as i32, qh, Silent);
                     let buffer = pool.create_buffer(0, size.0 as i32, size.1 as i32, size.2 as i32, size.3, qh, Silent);
-                    e.capture_buffers.insert(id, CaptureBuffer { map: Arc::new(MappedMemory { ptr: ptr as *mut u8, len }), size, _pool: pool, buffer, _fd: fd });
+                    e.capture_buffers.insert(key, CaptureBuffer { map: Arc::new(MappedMemory { ptr: ptr as *mut u8, len }), size, _pool: pool, buffer, _fd: fd });
                 }
                 // When watching, it waits for something to change: with what's behind
                 // standing still, nothing arrives. After presenting, it brings it the next time it's painted.
                 if self.on_change {
-                    frame.copy_with_damage(&e.capture_buffers[&id].buffer);
+                    frame.copy_with_damage(&e.capture_buffers[&key].buffer);
                 } else {
-                    frame.copy(&e.capture_buffers[&id].buffer);
+                    frame.copy(&e.capture_buffers[&key].buffer);
                 }
             }
             E::Ready { .. } => {
                 let id = self.target.id;
-                if let Some(f) = e.capture_buffers.get(&id) {
-                    let data: Arc<dyn AsRef<[u8]> + Send + Sync> = f.map.clone();
-                    let opacity = *self.target.opacity.lock().unwrap();
-                    let _ = e.to_render.send(ToRender::Backdrop(Box::new(super::Backdrop { sheet: id, width: f.size.0, height: f.size.1, stride: f.size.2, opacity, data: Some(data) })));
+                let opacity = *self.target.opacity.lock().unwrap();
+                let Some((parts, k)) = &self.part else {
+                    if let Some(f) = e.capture_buffers.get(&(id, 0)) {
+                        let data: Arc<dyn AsRef<[u8]> + Send + Sync> = f.map.clone();
+                        let _ = e.to_render.send(ToRender::Backdrop(Box::new(super::Backdrop { sheet: id, width: f.size.0, height: f.size.1, stride: f.size.2, opacity, data: Some(data), rects: Vec::new() })));
+                    }
+                    return self.finish();
+                };
+                let mut ps = parts.lock().unwrap();
+                if ps.over {
+                    return;
                 }
-                finish(frame);
+                let (Some(size), Some(src)) = (*self.format.lock().unwrap(), e.capture_buffers.get(&(id, *k)).map(|f| f.map.clone())) else {
+                    ps.over = true;
+                    self.failed(e);
+                    return self.finish();
+                };
+                // Where this part goes in the whole box, in the real pixels the compositor answered in.
+                let (r, hull) = (ps.rects[*k], ps.hull);
+                let scale = size.0 as f32 / r[2].max(1) as f32;
+                let whole = ((hull[2] as f32 * scale).round() as u32, (hull[3] as f32 * scale).round() as u32);
+                let at = (((r[0] - hull[0]) as f32 * scale).round() as u32, ((r[1] - hull[1]) as f32 * scale).round() as u32);
+                if at.0 + size.0 > whole.0 || at.1 + size.1 > whole.1 || (size.1 as f32 - r[3] as f32 * scale).abs() > 1.0 {
+                    eprintln!("render · the parts of a capture do not fit together ({size:?} at {at:?} in {whole:?}): capturing the whole box from now on");
+                    PARTS_BROKEN.store(true, Ordering::Relaxed);
+                    ps.over = true;
+                    self.failed(e);
+                    return self.finish();
+                }
+                if e.capture_hulls.get(&id).is_none_or(|h| h.size != whole) {
+                    let len = whole.0 as usize * whole.1 as usize * 4;
+                    // Anonymous memory, not shared with anyone: only the render reads it.
+                    let ptr = unsafe { libc::mmap(std::ptr::null_mut(), len, libc::PROT_READ | libc::PROT_WRITE, libc::MAP_PRIVATE | libc::MAP_ANONYMOUS, -1, 0) };
+                    if ptr == libc::MAP_FAILED {
+                        ps.over = true;
+                        self.failed(e);
+                        return self.finish();
+                    }
+                    e.capture_hulls.insert(id, Assembled { size: whole, map: Arc::new(MappedMemory { ptr: ptr as *mut u8, len }) });
+                }
+                let hull_map = e.capture_hulls[&id].map.clone();
+                let (row, to) = (size.0 as usize * 4, whole.0 as usize * 4);
+                for y in 0..size.1 as usize {
+                    // SAFETY: inside both buffers (checked above); the render does not read the whole one while a capture is on the way.
+                    unsafe { std::ptr::copy_nonoverlapping(src.ptr.add(y * size.2 as usize), hull_map.ptr.add((at.1 as usize + y) * to + at.0 as usize * 4), row) };
+                }
+                ps.valid.push([at.0, at.1, size.0, size.1]);
+                // Watching, the first part that changed is enough: the others are forgotten, and the render, which paints
+                // again for it, asks for everything right after presenting.
+                if self.on_change || ps.valid.len() == ps.rects.len() {
+                    ps.over = true;
+                    let data: Arc<dyn AsRef<[u8]> + Send + Sync> = hull_map;
+                    let _ = e.to_render.send(ToRender::Backdrop(Box::new(super::Backdrop { sheet: id, width: whole.0, height: whole.1, stride: whole.0 * 4, opacity, data: Some(data), rects: ps.valid.clone() })));
+                    drop(ps);
+                    self.finish();
+                }
             }
             // So the render doesn't stay waiting for it.
             E::Failed => {
-                let _ = e.to_render.send(ToRender::Backdrop(Box::new(super::Backdrop { sheet: self.target.id, width: 0, height: 0, stride: 0, opacity: 1.0, data: None })));
-                finish(frame)
+                if let Some((parts, _)) = &self.part {
+                    let mut ps = parts.lock().unwrap();
+                    if ps.over {
+                        return;
+                    }
+                    ps.over = true;
+                }
+                self.failed(e);
+                self.finish()
             }
             _ => {}
         }
@@ -655,7 +751,7 @@ impl PlatformWindow for WaylandWindow {
         Some((name, at))
     }
 
-    fn capture_backdrop(&self, bounds: [i32; 4], on_change: bool) -> bool {
+    fn capture_backdrop(&self, bounds: [i32; 4], rects: &[[i32; 4]], on_change: bool) -> bool {
         let (Some(d), Some((manager, _))) = (&self.backdrop, SCREENCOPY.get()) else { return false };
         if d.in_flight.load(Ordering::Relaxed) {
             return false;
@@ -674,14 +770,21 @@ impl PlatformWindow for WaylandWindow {
             return false;
         }
         // Without the cursor: the glass doesn't refract it, it goes on top.
-        let frame = manager.capture_output_region(0, &output, x + bounds[0], y + bounds[1], bounds[2], bounds[3], &self.qh, CaptureFor { target: d.clone(), on_change, format: Mutex::new(None) });
-        *d.frame.lock().unwrap() = Some(frame);
+        let mut frames = d.frames.lock().unwrap();
+        if rects.len() >= 2 && !PARTS_BROKEN.load(Ordering::Relaxed) {
+            let parts = Arc::new(Mutex::new(Parts { hull: bounds, rects: rects.to_vec(), valid: Vec::new(), over: false }));
+            for (k, r) in rects.iter().enumerate() {
+                frames.push(manager.capture_output_region(0, &output, x + r[0], y + r[1], r[2], r[3], &self.qh, CaptureFor { target: d.clone(), on_change, format: Mutex::new(None), part: Some((parts.clone(), k)) }));
+            }
+        } else {
+            frames.push(manager.capture_output_region(0, &output, x + bounds[0], y + bounds[1], bounds[2], bounds[3], &self.qh, CaptureFor { target: d.clone(), on_change, format: Mutex::new(None), part: None }));
+        }
         true
     }
 
     fn cancel_backdrop(&self) {
         let Some(d) = &self.backdrop else { return };
-        if let Some(m) = d.frame.lock().unwrap().take() {
+        for m in d.frames.lock().unwrap().drain(..) {
             m.destroy();
         }
         d.in_flight.store(false, Ordering::Relaxed);
@@ -815,7 +918,10 @@ struct State {
     to_render: Sender<ToRender>,
     qh: QueueHandle<State>,
     /// The memory for the captures of what's behind, one per surface.
-    capture_buffers: std::collections::HashMap<u32, CaptureBuffer>,
+    /// (and one for each part, when a capture is made of several).
+    capture_buffers: std::collections::HashMap<(u32, usize), CaptureBuffer>,
+    /// What the parts are copied into, one per surface.
+    capture_hulls: std::collections::HashMap<u32, Assembled>,
 }
 
 /// The Wayland objects that tell us nothing.
@@ -1572,6 +1678,7 @@ pub fn run_event_loop(wanted: Vec<Surface>, extra_height: u32, instance: wgpu::I
         connection: connection.clone(),
         qh: qh.clone(),
         capture_buffers: std::collections::HashMap::new(),
+        capture_hulls: std::collections::HashMap::new(),
         instance,
         wanted,
         extra_height,

@@ -153,7 +153,7 @@ pub struct Lens {
     bounds_uniforms: wgpu::Buffer,
     /// A received capture whose background is still to be unmixed: which
     /// canvas was presented and with which clip.
-    pending: Option<(usize, (u32, u32, u32, u32))>,
+    pending: Option<(usize, Vec<(u32, u32, u32, u32)>)>,
     /// There is already a background to show.
     pub ready: bool,
     /// How many captures it has taken in, and since when it exists: see `WARM_UP`.
@@ -247,7 +247,22 @@ impl Lens {
         // behind. Without this, painting the lens changes the capture, which
         // changes the lens, and so on without end. One byte in thirteen is
         // looked at, which is enough to know whether something has moved.
-        let sample: Vec<u8> = data.iter().copied().step_by(13).collect();
+        // A capture of parts looks at the parts only: the rest of the buffer holds nothing.
+        let parts: Vec<[u32; 4]> = d.rects.iter().copied().filter(|r| r[2] > 0 && r[3] > 0 && r[0] + r[2] <= d.width && r[1] + r[3] <= d.height).collect();
+        let sample: Vec<u8> = if parts.is_empty() {
+            data.iter().copied().step_by(13).collect()
+        } else {
+            let mut all = Vec::new();
+            for r in &parts {
+                for y in r[1]..r[1] + r[3] {
+                    let from = (y * d.stride + r[0] * 4) as usize;
+                    if let Some(row) = data.get(from..from + r[2] as usize * 4) {
+                        all.extend(row.iter().copied().step_by(13));
+                    }
+                }
+            }
+            all
+        };
         if self.ready && !self.warming() && bounds == self.bounds && sample.len() == self.sample.len() && sample.iter().zip(&self.sample).all(|(a, b)| a.abs_diff(*b) <= 3) {
             return false;
         }
@@ -260,12 +275,26 @@ impl Lens {
             self.capture = Some((tx, v, size));
         }
         let capture = self.capture.as_ref().unwrap();
-        g.queue.write_texture(
-            capture.0.as_image_copy(),
-            data,
-            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(d.stride), rows_per_image: Some(d.height) },
-            wgpu::Extent3d { width: d.width, height: d.height, depth_or_array_layers: 1 },
-        );
+        if parts.is_empty() {
+            g.queue.write_texture(
+                capture.0.as_image_copy(),
+                data,
+                wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(d.stride), rows_per_image: Some(d.height) },
+                wgpu::Extent3d { width: d.width, height: d.height, depth_or_array_layers: 1 },
+            );
+        } else {
+            // Only what was photographed goes up to the card: the rest of the texture keeps what it had, and is not read.
+            for r in &parts {
+                let mut to = capture.0.as_image_copy();
+                to.origin = wgpu::Origin3d { x: r[0], y: r[1], z: 0 };
+                g.queue.write_texture(
+                    to,
+                    data,
+                    wgpu::TexelCopyBufferLayout { offset: (r[1] * d.stride + r[0] * 4) as u64, bytes_per_row: Some(d.stride), rows_per_image: Some(r[3]) },
+                    wgpu::Extent3d { width: r[2], height: r[3], depth_or_array_layers: 1 },
+                );
+            }
+        }
         // The box in real pixels, inside the canvas.
         let (lw, lh) = self.px;
         let x0 = ((bounds[0] as f32 * scale).floor() as u32).min(lw);
@@ -275,12 +304,24 @@ impl Lens {
         if x1 <= x0 || y1 <= y0 {
             return false;
         }
-        let scissor = (x0, y0, x1 - x0, y1 - y0);
+        // What is unmixed: the whole box, or the parts of it that came.
+        let scissors: Vec<(u32, u32, u32, u32)> = if parts.is_empty() {
+            vec![(x0, y0, x1 - x0, y1 - y0)]
+        } else {
+            parts.iter().filter_map(|r| {
+                let (px0, py0) = ((x0 + r[0]).min(lw), (y0 + r[1]).min(lh));
+                let (px1, py1) = ((x0 + r[0] + r[2]).min(lw), (y0 + r[1] + r[3]).min(lh));
+                (px1 > px0 && py1 > py0).then_some((px0, py0, px1 - px0, py1 - py0))
+            }).collect()
+        };
+        if scissors.is_empty() {
+            return false;
+        }
         g.queue.write_buffer(&self.bounds_uniforms, 0, bytemuck::cast_slice(&[bounds[0] as f32 * scale, bounds[1] as f32 * scale, bounds[2] as f32 * scale, bounds[3] as f32 * scale, d.opacity, 0.0, 0.0, 0.0]));
         // The passes go in the same submission as the frame being painted now
         // —it has to be painted again—: a separate one cost one more `submit`,
         // a third of a millisecond per capture.
-        self.pending = Some((presented, scissor));
+        self.pending = Some((presented, scissors));
         let new = self.current ^ 1;
         self.group = Some(g.backdrop_group(&self.backgrounds[new].1, self.frost.result()));
         self.ready = true;
@@ -334,7 +375,7 @@ impl Lens {
         if self.fixed.is_some() {
             return;
         }
-        let Some((presented, scissor)) = self.pending.take() else { return };
+        let Some((presented, scissors)) = self.pending.take() else { return };
         let (Some(capture), (lw, lh)) = (self.capture.as_ref(), self.px) else { return };
         let dev = &g.device;
         // What is outside the box stays as it was: the new background starts
@@ -354,25 +395,30 @@ impl Lens {
             }
             dev.create_bind_group(&wgpu::BindGroupDescriptor { label: None, layout, entries: &entries })
         };
-        match &t.checked {
-            // Into the draft, counting; then into the new background, or what was there.
-            Some((check, settle)) => {
-                enc.clear_buffer(&self.verdict, 0, None);
-                pass(enc, check, &self.draft.1, &unmixing(&check.get_bind_group_layout(0), Some(&self.verdict)), scissor);
-                let settle_group = dev.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: None,
-                    layout: &settle.get_bind_group_layout(0),
-                    entries: &[
-                        wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&self.draft.1) },
-                        wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&self.backgrounds[self.current].1) },
-                        wgpu::BindGroupEntry { binding: 8, resource: self.verdict.as_entire_binding() },
-                    ],
-                });
-                pass(enc, settle, &self.backgrounds[new].1, &settle_group, scissor);
+        // Every part is unmixed before any is frosted: the frosting of one reads a little way into the next.
+        for &scissor in &scissors {
+            match &t.checked {
+                // Into the draft, counting; then into the new background, or what was there.
+                Some((check, settle)) => {
+                    enc.clear_buffer(&self.verdict, 0, None);
+                    pass(enc, check, &self.draft.1, &unmixing(&check.get_bind_group_layout(0), Some(&self.verdict)), scissor);
+                    let settle_group = dev.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: None,
+                        layout: &settle.get_bind_group_layout(0),
+                        entries: &[
+                            wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&self.draft.1) },
+                            wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&self.backgrounds[self.current].1) },
+                            wgpu::BindGroupEntry { binding: 8, resource: self.verdict.as_entire_binding() },
+                        ],
+                    });
+                    pass(enc, settle, &self.backgrounds[new].1, &settle_group, scissor);
+                }
+                None => pass(enc, &t.unmix, &self.backgrounds[new].1, &unmixing(&t.unmix.get_bind_group_layout(0), None), scissor),
             }
-            None => pass(enc, &t.unmix, &self.backgrounds[new].1, &unmixing(&t.unmix.get_bind_group_layout(0), None), scissor),
         }
-        self.frost.run(g, enc, &self.backgrounds[new].1, scissor, scale);
+        for &scissor in &scissors {
+            self.frost.run(g, enc, &self.backgrounds[new].1, scissor, scale);
+        }
         self.current = new;
     }
 }
@@ -525,6 +571,116 @@ impl Own {
 
 /// At most, one capture of what is behind every so often while painting.
 pub const CAPTURE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// The size of the squares the parts of a capture are made of, in logical pixels: the same 16 the box is rounded to.
+const PART_TILE: i32 = 16;
+/// More parts than this, or parts that are most of the box anyway, are not worth the extra requests: the box whole.
+const MAX_PARTS: usize = 12;
+
+/// The boxes of glass (`[x0, y0, x1, y1]`, logical, in a surface of `w` x `h`) and, with the room `margin`
+/// leaves them for the frosting, the few rectangles (`[x, y, width, height]`) that hold all of them and
+/// little else. A shell's frame is a ring round the screen: its box is the whole screen, but four bands
+/// hold it. Empty when the box whole is as good: one part, many parts, or parts that are most of it.
+pub fn capture_parts(boxes: &[[i32; 4]], margin: i32, w: i32, h: i32) -> Vec<[i32; 4]> {
+    if boxes.len() < 2 || w <= 0 || h <= 0 {
+        return Vec::new();
+    }
+    let (cols, rows) = ((w + PART_TILE - 1) / PART_TILE, (h + PART_TILE - 1) / PART_TILE);
+    let mut marked = vec![false; (cols * rows) as usize];
+    for b in boxes {
+        let (c0, c1) = (((b[0] - margin).max(0)) / PART_TILE, ((b[2] + margin + PART_TILE - 1) / PART_TILE).min(cols));
+        let (r0, r1) = (((b[1] - margin).max(0)) / PART_TILE, ((b[3] + margin + PART_TILE - 1) / PART_TILE).min(rows));
+        for r in r0..r1 {
+            for c in c0..c1 {
+                marked[(r * cols + c) as usize] = true;
+            }
+        }
+    }
+    // Runs of squares along each row; a run that is the same as the one above it is the same rectangle, taller.
+    let mut parts: Vec<[i32; 4]> = Vec::new();
+    let mut open: Vec<(i32, i32, i32)> = Vec::new();
+    let close = |parts: &mut Vec<[i32; 4]>, (c0, c1, r0): (i32, i32, i32), r1: i32| {
+        let (x, y) = (c0 * PART_TILE, r0 * PART_TILE);
+        parts.push([x, y, (c1 * PART_TILE).min(w) - x, (r1 * PART_TILE).min(h) - y]);
+    };
+    for r in 0..=rows {
+        let mut runs: Vec<(i32, i32)> = Vec::new();
+        if r < rows {
+            let mut c = 0;
+            while c < cols {
+                if marked[(r * cols + c) as usize] {
+                    let c0 = c;
+                    while c < cols && marked[(r * cols + c) as usize] {
+                        c += 1;
+                    }
+                    runs.push((c0, c));
+                } else {
+                    c += 1;
+                }
+            }
+        }
+        let mut next = Vec::new();
+        for o in open.drain(..) {
+            if runs.contains(&(o.0, o.1)) {
+                next.push(o);
+            } else {
+                close(&mut parts, o, r);
+            }
+        }
+        for run in runs {
+            if !next.iter().any(|o| (o.0, o.1) == run) {
+                next.push((run.0, run.1, r));
+            }
+        }
+        open = next;
+        if parts.len() > MAX_PARTS {
+            return Vec::new();
+        }
+    }
+    let area = |r: &[i32; 4]| r[2] as i64 * r[3] as i64;
+    let (all, hull) = (parts.iter().map(area).sum::<i64>(), {
+        let (x0, y0) = (parts.iter().map(|r| r[0]).min().unwrap_or(0), parts.iter().map(|r| r[1]).min().unwrap_or(0));
+        let (x1, y1) = (parts.iter().map(|r| r[0] + r[2]).max().unwrap_or(0), parts.iter().map(|r| r[1] + r[3]).max().unwrap_or(0));
+        (x1 - x0) as i64 * (y1 - y0) as i64
+    });
+    if parts.len() < 2 || parts.len() > MAX_PARTS || all * 10 > hull * 7 {
+        return Vec::new();
+    }
+    parts
+}
+
+#[cfg(test)]
+mod parts_tests {
+    use super::capture_parts;
+
+    #[test]
+    fn a_ring_round_the_screen_is_four_bands_not_the_screen() {
+        // A frame: a band along each edge, ten pixels thick.
+        let boxes = [[0, 0, 1920, 10], [0, 0, 10, 1080], [1910, 0, 1920, 1080], [0, 1070, 1920, 1080]];
+        let parts = capture_parts(&boxes, 42, 1920, 1080);
+        assert!(parts.len() >= 3 && parts.len() <= 12, "{parts:?}");
+        let area: i64 = parts.iter().map(|r| r[2] as i64 * r[3] as i64).sum();
+        assert!(area < 1920 * 1080 / 2, "{area}");
+        // Everything that must be captured is inside some part.
+        for b in &boxes {
+            for (x, y) in [(b[0], b[1]), (b[2] - 1, b[3] - 1), (b[0], b[3] - 1), (b[2] - 1, b[1])] {
+                assert!(parts.iter().any(|r| x >= r[0] && x < r[0] + r[2] && y >= r[1] && y < r[1] + r[3]), "({x}, {y}) is in no part: {parts:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn one_box_or_boxes_that_fill_their_hull_stay_whole() {
+        assert!(capture_parts(&[[100, 100, 400, 200]], 42, 1920, 1080).is_empty());
+        assert!(capture_parts(&[[0, 0, 1000, 1000], [500, 0, 1920, 1080]], 42, 1920, 1080).is_empty());
+    }
+
+    #[test]
+    fn two_far_apart_boxes_are_two_parts() {
+        let parts = capture_parts(&[[0, 0, 200, 40], [1700, 1000, 1920, 1080]], 42, 1920, 1080);
+        assert_eq!(parts.len(), 2, "{parts:?}");
+    }
+}
 
 /// How much margin the frosting needs around a glass, in logical pixels:
 /// the reach of the scene's blur.

@@ -4142,6 +4142,9 @@ pub fn run(
                 }
             }
             l.wants_lens = !with_lens.is_empty() || !read.is_empty();
+            if crate::gpu::timing_enabled() {
+                glass_regions_said(l.id, &with_lens, &read, l.view.size);
+            }
             // Only what is needed is captured: the glass's box, with a
             // margin for frosting, rounded to 16 px so as not to remake
             // textures over one pixel. In Marea, the little ball and not the 820 × 680.
@@ -4154,6 +4157,16 @@ pub fn run(
                 let y1 = ((b[3] + m + 15) / 16 * 16).min(h);
                 [x0, y0, x1 - x0, y1 - y0]
             });
+            // And the pieces of that box worth taking on their own: a frame round the screen is a box as big as
+            // the screen, and four bands. Made again only when the glass (or the surface) changes.
+            let mut src: Vec<[i32; 4]> = with_lens.iter().chain(&read).copied().collect();
+            src.push([l.view.size.0 as i32, l.view.size.1 as i32, -1, -1]);
+            if src != l.glass_src {
+                src.pop();
+                l.glass_rects = if std::env::var_os("PLEAMAR_WHOLE_CAPTURE").is_some() { Vec::new() } else { crate::lens::capture_parts(&src, crate::lens::margin().ceil() as i32, l.view.size.0 as i32, l.view.size.1 as i32) };
+                src.push([l.view.size.0 as i32, l.view.size.1 as i32, -1, -1]);
+                l.glass_src = src;
+            }
             // What the compositor blurs: the glass without a lens, and the one that has
             // it while there is still no background to show.
             // A lens that bends a picture (`lens = image`) still lets some of what is really behind through:
@@ -4961,11 +4974,48 @@ fn owe(l: &mut Sheet, rects: impl Iterator<Item = [f32; 4]>) {
     }
 }
 
+/// `PLEAMAR_TIMING=1`: the boxes of glass that bend (and those a shader reads) on a surface, when they change,
+/// and what share of the surface they cover next to the one box that is captured for all of them.
+fn glass_regions_said(sheet: impl std::fmt::Debug, bent: &[[i32; 4]], read: &[[i32; 4]], surface: (f32, f32)) {
+    static PREVIOUS: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+    let all: Vec<[i32; 4]> = bent.iter().chain(read).copied().collect();
+    let area = |b: &[i32; 4]| (b[2] - b[0]).max(0) as f32 * (b[3] - b[1]).max(0) as f32;
+    let total: f32 = all.iter().map(area).sum();
+    let hull = all.iter().copied().reduce(|a, b| [a[0].min(b[0]), a[1].min(b[1]), a[2].max(b[2]), a[3].max(b[3])]).map_or(0.0, |h| area(&h));
+    let whole = (surface.0 * surface.1).max(1.0);
+    let boxes: Vec<String> = all.iter().map(|b| format!("[{}, {}, {}, {}]", b[0], b[1], b[2], b[3])).collect();
+    let said = format!("{sheet:?} · {} boxes · {:.1}% of the surface, their hull {:.1}% · {}", all.len(), total / whole * 100.0, hull / whole * 100.0, boxes.join(" "));
+    let mut previous = PREVIOUS.lock().unwrap();
+    if *previous != said {
+        eprintln!("lens boxes · {said}");
+        *previous = said;
+    }
+}
+
+/// `PLEAMAR_TIMING=1`: every 5 s, how many captures of what is behind the glass arrived, how big
+/// they were (real pixels, and what share of the surface), to see what a bent frame costs.
+fn capture_stats(w: u32, h: u32, surface: (f32, f32)) {
+    static STATS: std::sync::Mutex<Option<(Instant, u32, u64, f32)>> = std::sync::Mutex::new(None);
+    let mut s = STATS.lock().unwrap();
+    let (since, n, px, share) = s.get_or_insert_with(|| (Instant::now(), 0, 0, 0.0));
+    *n += 1;
+    *px += w as u64 * h as u64;
+    *share += (w as f32 * h as f32) / (surface.0 * surface.1).max(1.0);
+    if since.elapsed() >= Duration::from_secs(5) {
+        let secs = since.elapsed().as_secs_f32();
+        eprintln!("lens · {:.1} captures a second · {:.2} Mpx each on average · {:.2} Mpx/s · {:.0}% of the surface (logical) on average", *n as f32 / secs, *px as f32 / *n as f32 / 1e6, *px as f32 / secs / 1e6, *share / *n as f32 * 100.0);
+        *s = None;
+    }
+}
+
 fn handle_backdrop(g: &Gpu, sheets: &mut [Sheet], d: Box<crate::platform::Backdrop>) -> bool {
     let Some(l) = sheets.iter_mut().find(|l| l.id == d.sheet) else { return false };
     l.capture = crate::gpu::BackdropCapture::Idle;
     if l.lens.is_none() {
         return false;
+    }
+    if crate::gpu::timing_enabled() {
+        capture_stats(d.width, d.height, l.view.size);
     }
     if g.receive_backdrop(l, *d) {
         // Only the glass sees it, and the glass is inside the box captured.

@@ -1031,7 +1031,12 @@ pub trait PlatformWindow: Send {
     /// gets subtracted from it. With `on_change`, it doesn't arrive until something changes in that
     /// box; without it, the next time the compositor paints the screen.
     /// `false` if it can't be asked for, or if there's already one on the way.
-    fn capture_backdrop(&self, _bounds: [i32; 4], _on_change: bool) -> bool {
+    ///
+    /// `rects` are the parts of `bounds` that are really needed (logical, in the window's own
+    /// coordinates, inside `bounds`): where the glass is, with room for its frosting. A platform that can
+    /// take just those leaves the rest of the buffer untouched and says which parts it filled in `Backdrop::rects`.
+    /// Empty, or one that is `bounds` itself, is the whole box.
+    fn capture_backdrop(&self, _bounds: [i32; 4], _rects: &[[i32; 4]], _on_change: bool) -> bool {
         false
     }
     /// Forget the capture that's on the way: it won't arrive anymore.
@@ -1062,6 +1067,8 @@ pub struct Backdrop {
     pub opacity: f32,
     /// The pixels, where the compositor left them, without copying them. `None` if the capture failed.
     pub data: Option<std::sync::Arc<dyn AsRef<[u8]> + Send + Sync>>,
+    /// The parts of the buffer that hold a capture, `[x, y, width, height]` in its real pixels. Empty: all of it.
+    pub rects: Vec<[u32; 4]>,
 }
 
 /// Whether the scene running wants to know where the mouse is on the whole
