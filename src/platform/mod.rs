@@ -1143,10 +1143,37 @@ pub struct Backdrop {
     /// With what opacity the compositor blended ours: 1 except in a
     /// window whose opacity is lowered (Hyprland: `decoration:active_opacity`).
     pub opacity: f32,
-    /// The pixels, where the compositor left them, without copying them. `None` if the capture failed.
+    /// The pixels, where the compositor left them, without copying them. `None` if the capture failed,
+    /// or if the compositor wrote them straight on the card (`card`).
     pub data: Option<std::sync::Arc<dyn AsRef<[u8]> + Send + Sync>>,
     /// The parts of the buffer that hold a capture, `[x, y, width, height]` in its real pixels. Empty: all of it.
     pub rects: Vec<[u32; 4]>,
+    /// The capture is in this texture of the card, written by the compositor: no readback, no upload.
+    pub card: Option<std::sync::Arc<CardBackdrop>>,
+    /// The compositor can copy into a buffer on the card (fourcc, width, height) and none was ready:
+    /// the render makes one (`CARD_BACKDROPS`) for the next capture.
+    pub offer: Option<(u32, u32, u32)>,
+}
+
+/// Where the compositor leaves the captures of one sheet, on the card.
+pub struct CardBackdrop {
+    pub texture: wgpu::Texture,
+    pub fd: std::os::fd::OwnedFd,
+    pub modifier: u64,
+    pub planes: Vec<(u32, u32)>,
+    pub fourcc: u32,
+    pub size: (u32, u32),
+}
+
+/// Each sheet's, by its id: made by the render when the compositor offers, taken by the platform thread.
+pub static CARD_BACKDROPS: std::sync::Mutex<Option<std::collections::HashMap<u32, std::sync::Arc<CardBackdrop>>>> = std::sync::Mutex::new(None);
+/// The sheets whose compositor did not take the card (a copy failed, or no layout): they go on in shared memory.
+pub static CARD_REFUSED: std::sync::Mutex<Vec<u32>> = std::sync::Mutex::new(Vec::new());
+
+/// `PLEAMAR_BACKDROP_SHM=1` keeps the old way (the compositor writes to shared memory), to compare.
+pub fn card_backdrops_allowed() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("PLEAMAR_BACKDROP_SHM").is_none())
 }
 
 /// Whether the scene running wants to know where the mouse is on the whole
@@ -1376,7 +1403,7 @@ mod system;
 #[cfg(target_os = "linux")]
 mod wayland;
 #[cfg(target_os = "linux")]
-pub use wayland::run_event_loop;
+pub use wayland::{backdrop_layouts, run_event_loop};
 
 /// The session's display, for a graphics instance that has to know it before any
 /// surface (OpenGL, through EGL). None where there is no such thing.
