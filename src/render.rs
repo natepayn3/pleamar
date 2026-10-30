@@ -5299,6 +5299,11 @@ fn owe(l: &mut Sheet, rects: impl Iterator<Item = [f32; 4]>) {
 
 fn handle_backdrop(g: &Gpu, sheets: &mut [Sheet], d: Box<crate::platform::Backdrop>) -> bool {
     let Some(l) = sheets.iter_mut().find(|l| l.id == d.sheet) else { return false };
+    // The compositor can write its captures straight on the card: a buffer for the next one.
+    #[cfg(target_os = "linux")]
+    if let Some((fourcc, w, h)) = d.offer {
+        make_card_backdrop(g, d.sheet, fourcc, (w, h));
+    }
     // One that was watching counts from when it arrives: it was read back now.
     if l.capture == crate::gpu::BackdropCapture::Watching {
         l.capture_taken = Instant::now();
@@ -5317,6 +5322,35 @@ fn handle_backdrop(g: &Gpu, sheets: &mut [Sheet], d: Box<crate::platform::Backdr
     } else {
         // Nothing new: the round watches again, once the interval allows.
         false
+    }
+}
+
+/// A buffer on the card of that size where the compositor leaves the captures of a sheet (see `CardBackdrop`).
+/// If the card or the compositor will not, that sheet stays on shared memory.
+#[cfg(target_os = "linux")]
+fn make_card_backdrop(g: &Gpu, sheet: u32, fourcc: u32, size: (u32, u32)) {
+    use crate::platform::{CardBackdrop, CARD_BACKDROPS, CARD_REFUSED};
+    if size.0 == 0 || size.1 == 0 || CARD_REFUSED.lock().unwrap().contains(&sheet) {
+        return;
+    }
+    if CARD_BACKDROPS.lock().unwrap().as_ref().and_then(|m| m.get(&sheet)).is_some_and(|c| c.size == size && c.fourcc == fourcc) {
+        return;
+    }
+    let refuse = |why: String| {
+        println!("render · captures stay in shared memory ({why})");
+        CARD_REFUSED.lock().unwrap().push(sheet);
+    };
+    if !g.device.features().contains(wgpu::Features::VULKAN_EXTERNAL_MEMORY_DMA_BUF) {
+        return refuse("the card does not share its memory with the compositor".into());
+    }
+    let layouts = crate::platform::backdrop_layouts(fourcc);
+    match crate::dmabuf::export_to_capture(&g.device, size, &layouts) {
+        Ok(e) => {
+            println!("render · captures of a glass go straight onto the card ({}×{}), the processor never reads them", size.0, size.1);
+            let card = std::sync::Arc::new(CardBackdrop { texture: e.texture, fd: e.fd, modifier: e.modifier, planes: e.planes, fourcc, size });
+            CARD_BACKDROPS.lock().unwrap().get_or_insert_with(Default::default).insert(sheet, card);
+        }
+        Err(why) => refuse(why),
     }
 }
 

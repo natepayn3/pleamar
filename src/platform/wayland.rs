@@ -64,6 +64,12 @@ struct Dmabufs {
 }
 static DMABUFS: std::sync::OnceLock<Dmabufs> = std::sync::OnceLock::new();
 static ARGB_LAYOUTS: Mutex<Vec<u64>> = Mutex::new(Vec::new());
+static XRGB_LAYOUTS: Mutex<Vec<u64>> = Mutex::new(Vec::new());
+
+/// The layouts the compositor reads a format in: where a capture of the screen can be left.
+pub fn backdrop_layouts(fourcc: u32) -> Vec<u64> {
+    if fourcc == crate::dmabuf::XRGB { XRGB_LAYOUTS.lock().unwrap().clone() } else { ARGB_LAYOUTS.lock().unwrap().clone() }
+}
 
 /// Version 3 says each format and layout it reads, one by one.
 struct Layouts;
@@ -73,6 +79,11 @@ impl Dispatch2<ZwpLinuxDmabufV1, State> for Layouts {
             let m = ((modifier_hi as u64) << 32) | modifier_lo as u64;
             let mut all = ARGB_LAYOUTS.lock().unwrap();
             if format == crate::dmabuf::ARGB && !all.contains(&m) {
+                all.push(m);
+            }
+            drop(all);
+            let mut all = XRGB_LAYOUTS.lock().unwrap();
+            if format == crate::dmabuf::XRGB && !all.contains(&m) {
                 all.push(m);
             }
         }
@@ -455,6 +466,10 @@ struct CaptureFor {
     on_change: bool,
     /// What the compositor offers to copy it into: size, stride and format.
     format: Mutex<Option<(u32, u32, u32, wl_shm::Format)>>,
+    /// What it offers to copy into on the card: format and size.
+    dmabuf: Mutex<Option<(u32, u32, u32)>>,
+    /// The buffer on the card it was asked to copy into.
+    on_card: Mutex<Option<Arc<super::CardBackdrop>>>,
 }
 
 /// The memory where the compositor leaves a surface's captures. It's
@@ -510,9 +525,40 @@ impl Dispatch2<ZwlrScreencopyFrameV1, State> for CaptureFor {
             E::Buffer { format: wayland_client::WEnum::Value(f), width, height, stride } if matches!(f, wl_shm::Format::Argb8888 | wl_shm::Format::Xrgb8888) => {
                 *self.format.lock().unwrap() = Some((width, height, stride, f));
             }
+            E::LinuxDmabuf { format, width, height } if matches!(format, crate::dmabuf::ARGB | crate::dmabuf::XRGB) => {
+                *self.dmabuf.lock().unwrap() = Some((format, width, height));
+            }
             E::BufferDone => {
-                let (Some(size), Some((_, shm))) = (*self.format.lock().unwrap(), SCREENCOPY.get()) else { return finish(frame) };
                 let id = self.target.id;
+                // On the card, if the render has made a buffer of the very size and format offered:
+                // the compositor copies straight into it, and the processor never sees the pixels.
+                if let (Some(offer), Some(d)) = (*self.dmabuf.lock().unwrap(), DMABUFS.get())
+                    && super::card_backdrops_allowed()
+                    && let Some(card) = super::CARD_BACKDROPS.lock().unwrap().as_ref().and_then(|m| m.get(&id).cloned())
+                    && card.fourcc == offer.0
+                    && card.size == (offer.1, offer.2)
+                {
+                    if e.card_buffers.get(&id).is_none_or(|(c, _)| !Arc::ptr_eq(c, &card)) {
+                        let params = d.global.create_params(&d.qh, Silent);
+                        for (k, (offset, stride)) in card.planes.iter().enumerate() {
+                            params.add(std::os::fd::AsFd::as_fd(&card.fd), k as u32, *offset, *stride, (card.modifier >> 32) as u32, card.modifier as u32);
+                        }
+                        let buffer = params.create_immed(offer.1 as i32, offer.2 as i32, offer.0, zwp_linux_buffer_params_v1::Flags::empty(), &d.qh, Silent);
+                        params.destroy();
+                        if let Some((_, old)) = e.card_buffers.insert(id, (card.clone(), buffer)) {
+                            old.destroy();
+                        }
+                    }
+                    *self.on_card.lock().unwrap() = Some(card);
+                    let buffer = &e.card_buffers[&id].1;
+                    if self.on_change {
+                        frame.copy_with_damage(buffer);
+                    } else {
+                        frame.copy(buffer);
+                    }
+                    return;
+                }
+                let (Some(size), Some((_, shm))) = (*self.format.lock().unwrap(), SCREENCOPY.get()) else { return finish(frame) };
                 if e.capture_buffers.get(&id).is_none_or(|f| f.size != size) {
                     e.capture_buffers.remove(&id);
                     let len = (size.2 * size.1) as usize;
@@ -535,16 +581,28 @@ impl Dispatch2<ZwlrScreencopyFrameV1, State> for CaptureFor {
             }
             E::Ready { .. } => {
                 let id = self.target.id;
-                if let Some(f) = e.capture_buffers.get(&id) {
+                let opacity = *self.target.opacity.lock().unwrap();
+                if let Some(card) = self.on_card.lock().unwrap().take() {
+                    let _ = e.to_render.send(ToRender::Backdrop(Box::new(super::Backdrop { sheet: id, width: card.size.0, height: card.size.1, stride: 0, opacity, data: None, card: Some(card), offer: None })));
+                } else if let Some(f) = e.capture_buffers.get(&id) {
                     let data: Arc<dyn AsRef<[u8]> + Send + Sync> = f.map.clone();
-                    let opacity = *self.target.opacity.lock().unwrap();
-                    let _ = e.to_render.send(ToRender::Backdrop(Box::new(super::Backdrop { sheet: id, width: f.size.0, height: f.size.1, stride: f.size.2, opacity, data: Some(data) })));
+                    // The compositor could have written on the card and nothing there was ready: the render is told.
+                    let offer = (*self.dmabuf.lock().unwrap()).filter(|_| super::card_backdrops_allowed() && !super::CARD_REFUSED.lock().unwrap().contains(&id));
+                    let _ = e.to_render.send(ToRender::Backdrop(Box::new(super::Backdrop { sheet: id, width: f.size.0, height: f.size.1, stride: f.size.2, opacity, data: Some(data), card: None, offer })));
                 }
                 finish(frame);
             }
             // So the render doesn't stay waiting for it.
             E::Failed => {
-                let _ = e.to_render.send(ToRender::Backdrop(Box::new(super::Backdrop { sheet: self.target.id, width: 0, height: 0, stride: 0, opacity: 1.0, data: None })));
+                // A copy on the card that failed (another card, a layout it will not write): shared memory from now on.
+                if self.on_card.lock().unwrap().take().is_some() {
+                    super::CARD_REFUSED.lock().unwrap().push(self.target.id);
+                    if let Some(m) = super::CARD_BACKDROPS.lock().unwrap().as_mut() {
+                        m.remove(&self.target.id);
+                    }
+                    println!("render · the compositor would not copy a capture onto the card: shared memory for this glass");
+                }
+                let _ = e.to_render.send(ToRender::Backdrop(Box::new(super::Backdrop { sheet: self.target.id, width: 0, height: 0, stride: 0, opacity: 1.0, data: None, card: None, offer: None })));
                 finish(frame)
             }
             _ => {}
@@ -691,7 +749,7 @@ impl PlatformWindow for WaylandWindow {
             return false;
         }
         // Without the cursor: the glass doesn't refract it, it goes on top.
-        let frame = manager.capture_output_region(0, &output, x + bounds[0], y + bounds[1], bounds[2], bounds[3], &self.qh, CaptureFor { target: d.clone(), on_change, format: Mutex::new(None) });
+        let frame = manager.capture_output_region(0, &output, x + bounds[0], y + bounds[1], bounds[2], bounds[3], &self.qh, CaptureFor { target: d.clone(), on_change, format: Mutex::new(None), dmabuf: Mutex::new(None), on_card: Mutex::new(None) });
         *d.frame.lock().unwrap() = Some(frame);
         true
     }
@@ -833,6 +891,8 @@ struct State {
     qh: QueueHandle<State>,
     /// The memory for the captures of what's behind, one per surface.
     capture_buffers: std::collections::HashMap<u32, CaptureBuffer>,
+    /// The buffers on the card the compositor copies captures into, by sheet.
+    card_buffers: std::collections::HashMap<u32, (Arc<super::CardBackdrop>, WlBuffer)>,
 }
 
 /// The Wayland objects that tell us nothing.
@@ -1595,6 +1655,7 @@ pub fn run_event_loop(wanted: Vec<Surface>, extra_height: u32, instance: wgpu::I
         connection: connection.clone(),
         qh: qh.clone(),
         capture_buffers: std::collections::HashMap::new(),
+        card_buffers: std::collections::HashMap::new(),
         instance,
         wanted,
         extra_height,

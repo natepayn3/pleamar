@@ -149,6 +149,8 @@ pub struct Lens {
     /// A sample of the last capture, and of which box it was: so as not to
     /// repeat the work if nothing has changed.
     sample: Vec<u8>,
+    /// The card's own look at a capture it holds (`receive`), made the first time one arrives.
+    compare: Option<Compare>,
     pub bounds: [i32; 4],
     bounds_uniforms: wgpu::Buffer,
     /// A received capture whose background is still to be unmixed: which
@@ -191,6 +193,7 @@ impl Lens {
             verdict: d.create_buffer(&wgpu::BufferDescriptor { label: Some("verdict"), size: 8, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }),
             frost: Frost::new(d, px, b),
             sample: Vec::new(),
+            compare: None,
             pending: None,
             bounds: [0; 4],
             bounds_uniforms: d.create_buffer(&wgpu::BufferDescriptor { label: Some("bounds"), size: 32, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }),
@@ -235,8 +238,11 @@ impl Lens {
         }
         let Some(presented) = self.presented else { return false };
         // A capture without data is one that failed.
-        let Some(data) = d.data else { return false };
-        let data: &[u8] = (*data).as_ref();
+        let size = (d.width, d.height);
+        let card = d.card.clone();
+        if card.is_none() && d.data.is_none() {
+            return false;
+        }
         // Counted even if it brings nothing new: a still background must not
         // keep the warm-up going for ever. During the warm-up none is skipped
         // for looking like the last one: the first ones are the ones not to
@@ -247,25 +253,49 @@ impl Lens {
         // behind. Without this, painting the lens changes the capture, which
         // changes the lens, and so on without end. One byte in thirteen is
         // looked at, which is enough to know whether something has moved.
-        let sample: Vec<u8> = data.iter().copied().step_by(13).collect();
-        if self.ready && !self.warming() && bounds == self.bounds && sample.len() == self.sample.len() && sample.iter().zip(&self.sample).all(|(a, b)| a.abs_diff(*b) <= 3) {
-            return false;
-        }
-        self.sample = sample;
-        self.bounds = bounds;
+        // A capture the compositor wrote on the card is looked at there, one pixel
+        // in nine, by the card (`Compare`); the processor never reads it.
         let dev = &g.device;
-        let size = (d.width, d.height);
-        if self.capture.as_ref().is_none_or(|f| f.2 != size) {
-            let (tx, v) = texture(dev, "capture", size, wgpu::TextureFormat::Bgra8Unorm, wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST);
-            self.capture = Some((tx, v, size));
+        let same_place = self.ready && !self.warming() && bounds == self.bounds;
+        let same_size = self.capture.as_ref().is_some_and(|f| f.2 == size);
+        if let Some(card) = &card {
+            if same_place && same_size && !self.sample.is_empty() && self.sample.len() == 1 && self.sample[0] == 1 {
+                let old = &self.capture.as_ref().unwrap().0;
+                let compare = self.compare.get_or_insert_with(|| Compare::new(dev));
+                if !compare.differs(g, &card.texture, old, size) {
+                    return false;
+                }
+            }
+            self.sample = vec![1];
+            self.bounds = bounds;
+            if !same_size {
+                let (tx, v) = texture(dev, "capture", size, wgpu::TextureFormat::Bgra8Unorm, wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST);
+                self.capture = Some((tx, v, size));
+            }
+            let capture = self.capture.as_ref().unwrap();
+            let mut enc = dev.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("a capture copied on the card") });
+            enc.copy_texture_to_texture(card.texture.as_image_copy(), capture.0.as_image_copy(), wgpu::Extent3d { width: size.0, height: size.1, depth_or_array_layers: 1 });
+            g.queue.submit([enc.finish()]);
+        } else {
+            let data: &[u8] = (**d.data.as_ref().unwrap()).as_ref();
+            let sample: Vec<u8> = data.iter().copied().step_by(13).collect();
+            if same_place && sample.len() == self.sample.len() && sample.iter().zip(&self.sample).all(|(a, b)| a.abs_diff(*b) <= 3) {
+                return false;
+            }
+            self.sample = sample;
+            self.bounds = bounds;
+            if !same_size {
+                let (tx, v) = texture(dev, "capture", size, wgpu::TextureFormat::Bgra8Unorm, wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST);
+                self.capture = Some((tx, v, size));
+            }
+            let capture = self.capture.as_ref().unwrap();
+            g.queue.write_texture(
+                capture.0.as_image_copy(),
+                data,
+                wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(d.stride), rows_per_image: Some(d.height) },
+                wgpu::Extent3d { width: d.width, height: d.height, depth_or_array_layers: 1 },
+            );
         }
-        let capture = self.capture.as_ref().unwrap();
-        g.queue.write_texture(
-            capture.0.as_image_copy(),
-            data,
-            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(d.stride), rows_per_image: Some(d.height) },
-            wgpu::Extent3d { width: d.width, height: d.height, depth_or_array_layers: 1 },
-        );
         // The box in real pixels, inside the canvas.
         let (lw, lh) = self.px;
         let x0 = ((bounds[0] as f32 * scale).floor() as u32).min(lw);
@@ -730,5 +760,91 @@ mod tests {
         assert_eq!(capture_interval(Some(0.25)), Duration::from_secs_f32(0.25));
         assert_eq!(capture_interval(Some(0.0)), Duration::from_secs_f32(INTERVAL_RANGE.0));
         assert_eq!(capture_interval(Some(1e6)), Duration::from_secs_f32(INTERVAL_RANGE.1));
+    }
+}
+
+
+/// Whether a capture on the card differs from the last one taken in, as the old
+/// way did on the processor: one pixel in nine, any colour by more than three
+/// levels. The card counts them and only that count (four bytes) is read back,
+/// so the capture, megabytes of it, never leaves the card.
+struct Compare {
+    pipeline: wgpu::ComputePipeline,
+    layout: wgpu::BindGroupLayout,
+    count: wgpu::Buffer,
+}
+
+const COMPARE_SHADER: &str = r#"
+@group(0) @binding(0) var fresh: texture_2d<f32>;
+@group(0) @binding(1) var kept: texture_2d<f32>;
+@group(0) @binding(2) var<storage, read_write> n: atomic<u32>;
+@compute @workgroup_size(16, 16) fn main(@builtin(global_invocation_id) g: vec3<u32>) {
+    let d = textureDimensions(fresh);
+    let p = g.xy * 3u;
+    if p.x < d.x && p.y < d.y {
+        let a = textureLoad(fresh, vec2<i32>(p), 0).rgb;
+        let b = textureLoad(kept, vec2<i32>(p), 0).rgb;
+        let m = max(abs(a.r - b.r), max(abs(a.g - b.g), abs(a.b - b.b)));
+        if m > 3.5 / 255.0 {
+            atomicAdd(&n, 1u);
+        }
+    }
+}
+"#;
+
+impl Compare {
+    fn new(d: &wgpu::Device) -> Compare {
+        let tex = |binding| wgpu::BindGroupLayoutEntry { binding, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: false }, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false }, count: None };
+        let layout = d.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("a capture compared"),
+            entries: &[tex(0), tex(1), wgpu::BindGroupLayoutEntry { binding: 2, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: wgpu::BufferSize::new(4) }, count: None }],
+        });
+        let pl = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("a capture compared"), bind_group_layouts: &[Some(&layout)], immediate_size: 0 });
+        let shader = d.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("a capture compared"), source: wgpu::ShaderSource::Wgsl(COMPARE_SHADER.into()) });
+        let pipeline = d.create_compute_pipeline(&wgpu::ComputePipelineDescriptor { label: Some("a capture compared"), layout: Some(&pl), module: &shader, entry_point: Some("main"), compilation_options: Default::default(), cache: None });
+        let count = d.create_buffer(&wgpu::BufferDescriptor { label: Some("pixels that differ"), size: 4, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+        Compare { pipeline, layout, count }
+    }
+
+    /// `true` if they differ, or if the card could not say.
+    fn differs(&self, g: &crate::gpu::Gpu, fresh: &wgpu::Texture, kept: &wgpu::Texture, size: (u32, u32)) -> bool {
+        let (dev, queue) = (&g.device, &g.queue);
+        let (fv, kv) = (fresh.create_view(&Default::default()), kept.create_view(&Default::default()));
+        let group = dev.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &self.layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&fv) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&kv) },
+                wgpu::BindGroupEntry { binding: 2, resource: self.count.as_entire_binding() },
+            ],
+        });
+        queue.write_buffer(&self.count, 0, &[0; 4]);
+        let mut enc = dev.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("a capture compared") });
+        {
+            let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("a capture compared"), timestamp_writes: None });
+            pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(0, &group, &[]);
+            pass.dispatch_workgroups(size.0.div_ceil(3).div_ceil(16), size.1.div_ceil(3).div_ceil(16), 1);
+        }
+        // A new one each time: one that was not mapped in time would still be waiting.
+        let read = dev.create_buffer(&wgpu::BufferDescriptor { label: Some("pixels that differ, to read"), size: 4, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+        enc.copy_buffer_to_buffer(&self.count, 0, &read, 0, 4);
+        let index = queue.submit([enc.finish()]);
+        let (tx, rx) = std::sync::mpsc::channel();
+        read.slice(..).map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r.is_ok());
+        });
+        let waited = dev.poll(wgpu::PollType::Wait { submission_index: Some(index), timeout: Some(std::time::Duration::from_millis(50)) });
+        let mapped = waited.is_ok() && rx.recv_timeout(std::time::Duration::from_millis(50)).unwrap_or(false);
+        if !mapped {
+            // Not told in time: taken as new, and the buffer given back when it is mapped.
+            return true;
+        }
+        let Ok(view) = read.slice(..).get_mapped_range() else { return true };
+        let n = u32::from_ne_bytes(view[..4].try_into().unwrap());
+        drop(view);
+        read.unmap();
+        n > 0
     }
 }
