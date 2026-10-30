@@ -5330,7 +5330,7 @@ fn handle_backdrop(g: &Gpu, sheets: &mut [Sheet], d: Box<crate::platform::Backdr
 #[cfg(target_os = "linux")]
 fn make_card_backdrop(g: &Gpu, sheet: u32, fourcc: u32, size: (u32, u32)) {
     use crate::platform::{CardBackdrop, CARD_BACKDROPS, CARD_REFUSED};
-    if size.0 == 0 || size.1 == 0 || CARD_REFUSED.lock().unwrap().contains(&sheet) {
+    if size.0 == 0 || size.1 == 0 || crate::platform::card_refused(sheet) {
         return;
     }
     if CARD_BACKDROPS.lock().unwrap().as_ref().and_then(|m| m.get(&sheet)).is_some_and(|c| c.size == size && c.fourcc == fourcc) {
@@ -5338,7 +5338,7 @@ fn make_card_backdrop(g: &Gpu, sheet: u32, fourcc: u32, size: (u32, u32)) {
     }
     let refuse = |why: String| {
         println!("render · captures stay in shared memory ({why})");
-        CARD_REFUSED.lock().unwrap().push(sheet);
+        CARD_REFUSED.lock().unwrap().push((sheet, Instant::now()));
     };
     if !g.device.features().contains(wgpu::Features::VULKAN_EXTERNAL_MEMORY_DMA_BUF) {
         return refuse("the card does not share its memory with the compositor".into());

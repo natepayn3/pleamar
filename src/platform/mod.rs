@@ -1119,7 +1119,15 @@ pub struct CardBackdrop {
 /// Each sheet's, by its id: made by the render when the compositor offers, taken by the platform thread.
 pub static CARD_BACKDROPS: std::sync::Mutex<Option<std::collections::HashMap<u32, std::sync::Arc<CardBackdrop>>>> = std::sync::Mutex::new(None);
 /// The sheets whose compositor did not take the card (a copy failed, or no layout): they go on in shared memory.
-pub static CARD_REFUSED: std::sync::Mutex<Vec<u32>> = std::sync::Mutex::new(Vec::new());
+/// For half a minute: a copy fails when a private window is shown, or the pointer is in it, and that passes.
+pub static CARD_REFUSED: std::sync::Mutex<Vec<(u32, std::time::Instant)>> = std::sync::Mutex::new(Vec::new());
+
+/// Whether that sheet's captures go through shared memory for now.
+pub fn card_refused(sheet: u32) -> bool {
+    let mut all = CARD_REFUSED.lock().unwrap();
+    all.retain(|(_, at)| at.elapsed() < std::time::Duration::from_secs(30));
+    all.iter().any(|(s, _)| *s == sheet)
+}
 
 /// `PLEAMAR_BACKDROP_SHM=1` keeps the old way (the compositor writes to shared memory), to compare.
 pub fn card_backdrops_allowed() -> bool {

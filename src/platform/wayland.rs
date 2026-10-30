@@ -587,7 +587,7 @@ impl Dispatch2<ZwlrScreencopyFrameV1, State> for CaptureFor {
                 } else if let Some(f) = e.capture_buffers.get(&id) {
                     let data: Arc<dyn AsRef<[u8]> + Send + Sync> = f.map.clone();
                     // The compositor could have written on the card and nothing there was ready: the render is told.
-                    let offer = (*self.dmabuf.lock().unwrap()).filter(|_| super::card_backdrops_allowed() && !super::CARD_REFUSED.lock().unwrap().contains(&id));
+                    let offer = (*self.dmabuf.lock().unwrap()).filter(|_| super::card_backdrops_allowed() && !super::card_refused(id));
                     let _ = e.to_render.send(ToRender::Backdrop(Box::new(super::Backdrop { sheet: id, width: f.size.0, height: f.size.1, stride: f.size.2, opacity, data: Some(data), card: None, offer })));
                 }
                 finish(frame);
@@ -596,7 +596,7 @@ impl Dispatch2<ZwlrScreencopyFrameV1, State> for CaptureFor {
             E::Failed => {
                 // A copy on the card that failed (another card, a layout it will not write): shared memory from now on.
                 if self.on_card.lock().unwrap().take().is_some() {
-                    super::CARD_REFUSED.lock().unwrap().push(self.target.id);
+                    super::CARD_REFUSED.lock().unwrap().push((self.target.id, std::time::Instant::now()));
                     if let Some(m) = super::CARD_BACKDROPS.lock().unwrap().as_mut() {
                         m.remove(&self.target.id);
                     }
