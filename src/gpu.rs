@@ -160,6 +160,9 @@ pub struct DrawList {
     pub no_copy: bool,
     /// This frame: stretches copied, and stretches put together.
     pub copied: (u32, u32),
+    /// With `PLEAMAR_DEBUG_STRETCHES`: which stretches were put together again, and why
+    /// (stretch, reason, fact or property), with how many times and how long each is.
+    pub remade: std::collections::BTreeMap<(usize, u8, u32), (u32, usize)>,
     plan: Plan,
     /// Each body shape as it came out the last time, by instruction, and for
     /// which instructions (see `ShapeMemo`).
@@ -1731,6 +1734,29 @@ impl DrawList {
                         copied += 1;
                         next = to;
                         continue;
+                    }
+                    if debug_stretches() {
+                        let st = &self.stretch_list[which];
+                        let (reason, id) = match self.kept.get(which).and_then(Option::as_ref) {
+                            None => (0, 0),
+                            Some(k) if !k.copyable => (1, 0),
+                            Some(k) if k.entry != entry => (2, 0),
+                            Some(k) if k.starts != starts => {
+                                let (a, b) = (k.starts, starts);
+                                let diff = [a.shapes != b.shapes, a.shape_bounds != b.shape_bounds, a.points != b.points, a.stops != b.stops, a.elements != b.elements, a.offscreen_groups != b.offscreen_groups, a.particle_marks != b.particle_marks, a.blend_marks != b.blend_marks, a.picture_marks != b.picture_marks, a.glass_marks != b.glass_marks, a.glass_regions != b.glass_regions, a.windows_drawn != b.windows_drawn, a.fields != b.fields, a.selectable != b.selectable, a.measurements != b.measurements];
+                                (3, diff.iter().enumerate().fold(0u32, |m, (i, d)| m | ((*d as u32) << i)))
+                            }
+                            Some(k) if !fits(k) => (4, 0),
+                            Some(k) => match k.facts.iter().zip(&k.fact_values).find(|(f, v)| !c.facts.get(**f as usize).is_some_and(|x| x.to_bits() == v.to_bits())) {
+                                Some((f, _)) => (5, *f as u32),
+                                None => match k.props.iter().zip(&k.prop_values).find(|(p, v)| !c.props.get(**p as usize).is_some_and(|x| x.x.to_bits() == v.0.to_bits() && x.v.to_bits() == v.1.to_bits())) {
+                                    Some((p, _)) => (6, *p as u32),
+                                    None => (7, 0),
+                                },
+                            },
+                        };
+                        let e = self.remade.entry((which, reason, id)).or_insert((0, st.to - st.from));
+                        e.0 += 1;
                     }
                     if let Some(seen) = c.seen {
                         seen.pass_to(&self.reads);
@@ -4729,6 +4755,12 @@ fn gpu_time_enabled() -> bool {
 
 thread_local! {
     static GPU_TIME: std::cell::Cell<(f32, u32)> = const { std::cell::Cell::new((0.0, 0)) };
+}
+
+/// `PLEAMAR_DEBUG_STRETCHES`: read once.
+fn debug_stretches() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("PLEAMAR_DEBUG_STRETCHES").is_some())
 }
 
 /// `PLEAMAR_TIMING=1`: read once, not on every frame of every sheet.

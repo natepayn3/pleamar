@@ -683,6 +683,8 @@ pub fn run(
     let mut prof_since = Instant::now();
     let mut prof_window_frames = 0u32;
     let mut prof_painted = 0u32;
+    // Why a sheet did not paint in a round: not its turn, its own `rate:`, waiting for a lens capture, for the screen (fifo), for the compositor (others), or the paint declined.
+    let mut prof_skips = [0u32; 6];
     let mut prof_awake = [0u32; 8];
     // The thread's CPU outside the sections: taking what has arrived, at the
     // start of a round, and waiting for its turn to paint.
@@ -4759,6 +4761,7 @@ pub fn run(
                 }
             };
             if !its_turn {
+                prof_skips[0] += 1;
                 up_to_date += 1;
                 continue;
             }
@@ -4771,6 +4774,7 @@ pub fn run(
                     let period = Duration::from_secs_f64(1.0 / r as f64);
                     if let Some(last) = l.rate_last.filter(|t| t.elapsed() + Duration::from_millis(2) < period) {
                         skip(l);
+                        prof_skips[1] += 1;
                         appointments.push(last + period);
                         up_to_date += 1;
                         continue;
@@ -4785,6 +4789,7 @@ pub fn run(
                     // It arrives in less than a refresh. If it takes longer, it has been lost.
                     crate::gpu::BackdropCapture::AfterPresent if l.capture_asked.elapsed() < Duration::from_millis(100) => {
                         skip(l);
+                        prof_skips[2] += 1;
                         up_to_date += 1;
                         continue;
                     }
@@ -4837,6 +4842,7 @@ pub fn run(
                         }
                     }
                     skip(l);
+                    prof_skips[3] += 1;
                     up_to_date += 1;
                     continue;
                 }
@@ -4859,6 +4865,7 @@ pub fn run(
                 }
                 // What changed meanwhile is not lost: it is painted when its turn comes.
                 skip(l);
+                prof_skips[4] += 1;
                 up_to_date += 1;
                 continue;
             }
@@ -4869,6 +4876,8 @@ pub fn run(
             let was_painted = g.paint(l, &draw, &uniforms, asks || others || fifo, (knows_where && l.painted == Some(where_)).then(|| with_owed.as_deref().unwrap_or(&changed[..])));
             if was_painted {
                 l.rate_last = Some(Instant::now());
+            } else {
+                prof_skips[5] += 1;
             }
             if was_painted && ((others && answers.contains(&l.id)) || (fifo && l.open)) {
                 in_flight.retain(|f| f.0 != l.id);
@@ -5172,6 +5181,30 @@ pub fn run(
                     "timing · CPU per round: input {:.2} · rules and springs {:.2} · windows' frames to the card {:.2} · compose {:.2} · regions {:.2} · paint {:.2} · rest {:.2} ms",
                     prof_cpu[0] / f, (prof_cpu[1] + prof_cpu[2]) / f, prof_cpu[7] / f, prof_cpu[3] / f, prof_cpu[4] / f, prof_cpu[5] / f, prof_cpu[6] / f
                 );
+                println!(
+                    "timing · sheets that did not paint, per second: not their turn {:.0} · own rate {:.0} · lens capture {:.0} · screen {:.0} · compositor {:.0} · paint declined {:.0}",
+                    prof_skips[0] as f64 / prof_since.elapsed().as_secs_f64(), prof_skips[1] as f64 / prof_since.elapsed().as_secs_f64(), prof_skips[2] as f64 / prof_since.elapsed().as_secs_f64(), prof_skips[3] as f64 / prof_since.elapsed().as_secs_f64(), prof_skips[4] as f64 / prof_since.elapsed().as_secs_f64(), prof_skips[5] as f64 / prof_since.elapsed().as_secs_f64()
+                );
+                prof_skips = [0; 6];
+                if !draw.remade.is_empty() {
+                    let mut top: Vec<_> = std::mem::take(&mut draw.remade).into_iter().collect();
+                    top.sort_by(|a, b| b.1.0.cmp(&a.1.0));
+                    top.truncate(8);
+                    let why = |r: u8, id: u32| match r {
+                        0 => "new".to_string(),
+                        1 => "not copyable".into(),
+                        2 => "entry changed".into(),
+                        3 => {
+                            const L: [&str; 15] = ["shapes", "shape bounds", "points", "stops", "elements", "offscreen groups", "particle marks", "blend marks", "picture marks", "glass marks", "glass regions", "windows drawn", "fields", "selectable", "measurements"];
+                            format!("start moved: {}", L.iter().enumerate().filter(|(i, _)| id >> i & 1 == 1).map(|(_, n)| *n).collect::<Vec<_>>().join(", "))
+                        }
+                        4 => "lists shrank".into(),
+                        5 => format!("fact {}", scene.facts.get(id as usize).map_or("?", |f| f.0)),
+                        6 => format!("property {}", scene.props.get(id as usize).map_or("?", |p| p.0)),
+                        _ => "?".into(),
+                    };
+                    println!("timing · stretches put together most, in 300 rounds: {}", top.iter().map(|((w, r, id), (n, len))| format!("#{w} ({len} instructions) {n} × {}", why(*r, *id))).collect::<Vec<_>>().join(" · "));
+                }
                 // How much of the drawing was copied from the frame before instead of being put together.
                 if stretches_copied + stretches_made > 0 {
                     println!(
