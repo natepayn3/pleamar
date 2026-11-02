@@ -5070,7 +5070,9 @@ pub fn run(
             // And what it owes.
             let with_owed: Option<Vec<[f32; 4]>> = (!l.owed_damage.is_empty()).then(|| changed.iter().chain(&l.owed_damage).copied().collect());
             l.owed_damage.clear();
-            let was_painted = g.paint(l, &draw, &uniforms, asks || others || fifo, (knows_where && l.painted == Some(where_)).then(|| with_owed.as_deref().unwrap_or(&changed[..])));
+            // A nudge says the whole sheet changed: presented with nothing changed, the compositor has nothing to paint
+            // again, so it does not paint the monitor, and the capture the nudge is for is never answered (#118).
+            let was_painted = g.paint(l, &draw, &uniforms, asks || others || fifo, (knows_where && l.painted == Some(where_) && !nudge).then(|| with_owed.as_deref().unwrap_or(&changed[..])));
             if was_painted {
                 l.rate_last = Some(Instant::now());
             }
@@ -5135,6 +5137,23 @@ pub fn run(
         // watching counts as one, and the next waits out the interval (an
         // appointment wakes the render for it). Without that, a paint and a
         // watch each cycle made two captures per interval (issue 106).
+        // A capture asked after presenting that never came is lost: nothing else asks another while one is on the way,
+        // and with nothing to wake the render the glass kept what it saw last —a panel closed long ago, still in it—
+        // until something made it paint (#118). The compositor did not paint the monitor after that frame, or the
+        // nudge for it. It is asked again, owed; and a monitor that answers none (switched off) less and less often.
+        for l in sheets.iter_mut().filter(|l| l.lens.is_some() && l.capture == crate::gpu::BackdropCapture::AfterPresent) {
+            let lost_after = crate::lens::capture_lost_after(l.captures_lost);
+            if l.capture_asked.elapsed() < lost_after {
+                appointments.push(l.capture_asked + lost_after);
+                continue;
+            }
+            crate::lens::log_still(l.id, "a capture never answered: asked again");
+            l.cancel_backdrop();
+            l.captures_lost = l.captures_lost.saturating_add(1);
+            l.capture_owed = true;
+            // (A sheet that painted this round asks it on its next one, which this wakes.)
+            appointments.push(Instant::now() + Duration::from_millis(1));
+        }
         for l in &mut sheets {
             if l.lens.is_none() || std::mem::take(&mut l.painted_now) {
                 continue;
@@ -5610,6 +5629,7 @@ fn handle_backdrop(g: &Gpu, sheets: &mut [Sheet], d: Box<crate::platform::Backdr
     }
     l.capture = crate::gpu::BackdropCapture::Idle;
     l.capture_forced = false;
+    l.captures_lost = 0;
     let replaced = std::mem::take(&mut l.watch_replaced);
     if l.lens.is_none() {
         return false;

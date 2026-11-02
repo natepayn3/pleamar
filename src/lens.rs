@@ -909,6 +909,15 @@ pub fn watch_replaced_came(new: bool) {
     }
 }
 
+/// How long a capture asked after presenting is waited for before it is taken for lost and asked again: the
+/// compositor answers it the next time it paints the monitor, which presenting makes it do: within a frame or two.
+/// Each one lost in a row doubles it, up to 4 s: a monitor that is off answers none.
+pub const CAPTURE_LOST: std::time::Duration = std::time::Duration::from_millis(500);
+
+pub fn capture_lost_after(lost: u32) -> std::time::Duration {
+    CAPTURE_LOST * (1u32 << lost.min(3))
+}
+
 /// What a sheet that has not painted this round does about what is behind.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Still {
@@ -1212,6 +1221,14 @@ mod tests {
         assert_eq!(warming.still(false), Still::Watch);
         // Let go, with what it owes: one capture straight away.
         assert_eq!(Pace { held: false, ..p }.still(true), Still::Capture);
+    }
+
+    #[test]
+    fn a_lost_capture_is_asked_again_less_and_less_often() {
+        assert_eq!(capture_lost_after(0), Duration::from_millis(500));
+        assert_eq!(capture_lost_after(1), Duration::from_secs(1));
+        assert_eq!(capture_lost_after(3), Duration::from_secs(4));
+        assert_eq!(capture_lost_after(40), Duration::from_secs(4));
     }
 
     #[test]
