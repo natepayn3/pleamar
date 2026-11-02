@@ -924,6 +924,11 @@ struct State {
     wanted: Vec<Surface>,
     extra_height: u32,
     placed: Vec<Placed>,
+    /// The monitors the compositor has finished telling about (`new_output`): only these are placed on again when
+    /// another comes or goes. One still being told about has no size yet, and a surface as big as the monitor that
+    /// keeps a reserve, placed on it then, stuck to its four edges, where layer-shell ignores the reserve: Calima's
+    /// bar kept no room on the second monitor, over its windows.
+    announced: Vec<wl_output::WlOutput>,
     pointer: Option<wl_pointer::WlPointer>,
     /// Every pointer it listens to, with its seat: the user's, and an agent's
     /// own (pleamar-wm's `cua-agent`), whose presses on what a scene keeps for
@@ -1036,7 +1041,8 @@ impl State {
                 continue;
             }
             let wl = self.compositor.create_surface(qh);
-            let level = layer_of(p.level);
+            let said = said_of(which);
+            let level = layer_of(said.level.unwrap_or(p.level));
             // `kind: window`: one of the normal windows, with its title and its frame.
             if let (Some(title), Some(pp)) = (&p.window, POPUPS.get()) {
                 let window = pp.xdg.create_window(wl, WindowDecorations::RequestServer, qh);
@@ -1057,7 +1063,7 @@ impl State {
             let layer = self.layers.create_layer_surface(qh, wl, level, Some("pleamar"), Some(output));
             let reserves = p.exclusive_zone > 0 || p.reserve_while.is_some();
             let mut stretch = Stretch { width: p.width == 0, height: p.height == 0, monitor: if reserves { info.logical_size } else { None }, edges: Anchor::empty(), screen: info.logical_size, extra_height: height - p.height };
-            let (edges, size) = placement(p.anchor, stretch, (p.width, height));
+            let (edges, size) = placement(said.anchor.unwrap_or(p.anchor), stretch, (p.width, height));
             stretch.edges = edges;
             layer.set_anchor(edges);
             // The second one on the same monitor, below the first: it's for trying things out.
@@ -1070,8 +1076,8 @@ impl State {
                 c.placed.lock().unwrap().push((which, layer.clone(), margin, stretch));
             }
             layer.set_size(size.0, size.1);
-            // With a condition, none until the render says it holds.
-            layer.set_exclusive_zone(if p.reserve_while.is_some() { 0 } else { p.exclusive_zone });
+            // With a condition, none until the render says it holds (or what it last said, for a copy placed later).
+            layer.set_exclusive_zone(if p.reserve_while.is_some() { said.zone.unwrap_or(0) } else { p.exclusive_zone });
             // If the keyboard depends on something (`exclusive while open`), it's born without it.
             layer.set_keyboard_interactivity(keyboard_interactivity(if p.keyboard_while { Keyboard::Never } else { p.keyboard }));
             let id = next_surface_id();
@@ -1116,7 +1122,7 @@ impl State {
     /// Every monitor gets again what its number gives it: when one comes or goes the others' numbers change, and the compositor need not say
     /// anything else about them.
     fn place_on_all(&mut self, qh: &QueueHandle<State>, except: Option<&wl_output::WlOutput>) {
-        let all: Vec<wl_output::WlOutput> = self.outputs.outputs().filter(|o| Some(o) != except).collect();
+        let all: Vec<wl_output::WlOutput> = self.outputs.outputs().filter(|o| Some(o) != except && self.announced.contains(o)).collect();
         for o in &all {
             self.place_on(o, qh);
         }
@@ -1486,6 +1492,23 @@ fn placement(anchor: SurfaceAnchor, s: Stretch, asked: (u32, u32)) -> (Anchor, (
 struct MovableLayers {
     connection: Connection,
     placed: Mutex<Vec<(usize, LayerSurface, [i32; 4], Stretch)>>,
+    /// What the render last said of each surface while running —its room, its edge, its level—: a copy placed
+    /// afterwards (a monitor that comes, or one whose number changed) is born with it. The render says each only
+    /// when it changes, so a copy placed after it was said kept the scene's first values: a bar keeping no room
+    /// on the second monitor, over the windows there.
+    said: Mutex<std::collections::HashMap<usize, Said>>,
+}
+
+#[derive(Clone, Copy, Default)]
+struct Said {
+    zone: Option<i32>,
+    anchor: Option<SurfaceAnchor>,
+    level: Option<Level>,
+}
+
+/// What the render last said of surface `which` (see `MovableLayers::said`).
+fn said_of(which: usize) -> Said {
+    MOVABLE_LAYERS.get().and_then(|c| c.said.lock().unwrap().get(&which).copied()).unwrap_or_default()
 }
 static MOVABLE_LAYERS: std::sync::OnceLock<MovableLayers> = std::sync::OnceLock::new();
 static LAYERS_PLACED: AtomicU64 = AtomicU64::new(0);
@@ -1506,6 +1529,7 @@ fn layer_of(level: Level) -> Layer {
 
 pub fn relayer(which: usize, level: Level) {
     let Some(c) = MOVABLE_LAYERS.get() else { return };
+    c.said.lock().unwrap().entry(which).or_default().level = Some(level);
     let mut any = false;
     for (k, layer, _, _) in c.placed.lock().unwrap().iter() {
         if *k == which {
@@ -1521,6 +1545,7 @@ pub fn relayer(which: usize, level: Level) {
 
 pub fn rezone(which: usize, zone: i32) {
     let Some(c) = MOVABLE_LAYERS.get() else { return };
+    c.said.lock().unwrap().entry(which).or_default().zone = Some(zone);
     let mut any = false;
     for (k, layer, _, _) in c.placed.lock().unwrap().iter() {
         if *k == which {
@@ -1536,6 +1561,7 @@ pub fn rezone(which: usize, zone: i32) {
 
 pub fn reanchor(which: usize, anchor: SurfaceAnchor) {
     let Some(c) = MOVABLE_LAYERS.get() else { return };
+    c.said.lock().unwrap().entry(which).or_default().anchor = Some(anchor);
     let mut any = false;
     for (k, layer, margin, stretch) in c.placed.lock().unwrap().iter_mut() {
         if *k != which {
@@ -1563,6 +1589,11 @@ pub fn reanchor(which: usize, anchor: SurfaceAnchor) {
 /// as it takes any other.
 pub fn reshape(which: usize, p: &crate::scene::Surface) {
     let Some(c) = MOVABLE_LAYERS.get() else { return };
+    // Its edge and level are the reloaded scene's now (the render says them again if they still depend on something).
+    if let Some(said) = c.said.lock().unwrap().get_mut(&which) {
+        said.anchor = None;
+        said.level = None;
+    }
     let mut any = false;
     for (k, layer, margin, stretch) in c.placed.lock().unwrap().iter_mut() {
         if *k != which {
@@ -1769,6 +1800,7 @@ pub fn run_event_loop(wanted: Vec<Surface>, extra_height: u32, instance: wgpu::I
         wanted,
         extra_height,
         placed: Vec::new(),
+        announced: Vec::new(),
         pointer: None,
         pointer_seats: Vec::new(),
         keyboard: None,
@@ -1783,7 +1815,7 @@ pub fn run_event_loop(wanted: Vec<Surface>, extra_height: u32, instance: wgpu::I
     };
     match XdgShell::bind(&globals, &qh) {
         Ok(xdg) => {
-            let _ = MOVABLE_LAYERS.set(MovableLayers { connection: connection.clone(), placed: Mutex::default() });
+            let _ = MOVABLE_LAYERS.set(MovableLayers { connection: connection.clone(), placed: Mutex::default(), said: Mutex::default() });
             let _ = POPUPS.set(Popups {
                 qh: qh.clone(),
                 compositor: state.compositor.clone(),
@@ -2368,6 +2400,9 @@ impl OutputHandler for State {
     /// A monitor plugged in with the program running.
     fn new_output(&mut self, _: &Connection, qh: &QueueHandle<Self>, output: wl_output::WlOutput) {
         outputs_changed(&self.to_render);
+        if !self.announced.contains(&output) {
+            self.announced.push(output.clone());
+        }
         self.place_on(&output, qh);
         self.place_on_all(qh, None);
     }
@@ -2410,6 +2445,7 @@ impl OutputHandler for State {
     }
     fn output_destroyed(&mut self, _: &Connection, qh: &QueueHandle<Self>, output: wl_output::WlOutput) {
         outputs_changed(&self.to_render);
+        self.announced.retain(|o| o != &output);
         self.remove_from(&output);
         self.place_on_all(qh, Some(&output));
     }
