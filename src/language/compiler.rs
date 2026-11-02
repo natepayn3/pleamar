@@ -4764,7 +4764,13 @@ impl<'a> Compiler<'a> {
         // belongs to a panel —anchor, level, reserve, monitor— does not apply to it.
         if let Some(c) = p.get_mut("kind") {
             match c.one_of(vocab::SURFACE_KINDS, "what kind of surface this is")?.as_str() {
-                "window" => s.window = Some(String::new()),
+                // (A window has its frame's close button: the prototype's emergency exit —a right click closes
+                // a scene that does not use the right button— is not for it. An app closed at a right click on
+                // anything, with nothing to say why.)
+                "window" => {
+                    s.window = Some(String::new());
+                    s.right_click_quits = false;
+                }
                 // `kind: lock`: the lock screen. It takes the whole monitor
                 // —how big it is, the compositor says— and goes on all of them.
                 // Its keyboard is its own, whatever the first surface says: taken
@@ -4772,6 +4778,7 @@ impl<'a> Compiler<'a> {
                 // the keyboard and its password could not be typed (pleamar-wm#38).
                 "lock" => {
                     s.lock_screen = true;
+                    s.right_click_quits = false;
                     s.screens = Screens::All;
                     s.keyboard = Keyboard::Always;
                     s.keyboard_said = true;
