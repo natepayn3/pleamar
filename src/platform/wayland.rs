@@ -1019,6 +1019,7 @@ impl State {
             }
         }
         lock_face_for_new_monitor(output, &name, number, mhz);
+        self.drop_moved_copies(output, number);
         for which in 0..self.wanted.len() {
             // The lock one isn't placed: it's engaged, when the scene says so.
             if self.wanted[which].lock_screen {
@@ -1087,6 +1088,37 @@ impl State {
             self.placed.push(Placed { id, which, role: Role::Layer(layer), output: output.clone(), viewport, _fractional_scale: fractional_scale, scale: 1.0, size: (0, 0), pending: Some((surface, name.clone(), mhz)), layer_placement, backdrop });
             LAYERS_PLACED.fetch_add(1, Ordering::Relaxed);
             }
+        }
+    }
+
+    /// A copy handed out by number (`screens: each`, copy k on monitor k) that this monitor's number no longer gives it goes away. The monitors
+    /// are numbered in the order the compositor lists them, and that order changes when one comes or goes: one switched on after the session
+    /// started, or woken from standby, is listed again, last, and the others move up. Each was given the copy of its new number, and kept the
+    /// one of its old number too: the same copy on two monitors, so the bar and the desktop widgets showed twice and the panels opened on the
+    /// wrong one, until the program was started again. The copy itself (its springs, its facts) lives on in the render, and shows again where
+    /// its number now is.
+    fn drop_moved_copies(&mut self, output: &wl_output::WlOutput, number: usize) {
+        let moved = |p: &Placed, wanted: &[Surface]| {
+            &p.output == output
+                && matches!(p.role, Role::Layer(_))
+                && wanted.get(p.which).is_some_and(|s| matches!(s.screens, Screens::Number(x) if x != number))
+        };
+        let wanted = &self.wanted;
+        for p in self.placed.iter().filter(|p| moved(p, wanted)) {
+            let _ = self.to_render.send(ToRender::SheetGone(p.id));
+            if let Some(c) = MOVABLE_LAYERS.get() {
+                c.placed.lock().unwrap().retain(|(_, layer, _, _)| layer.wl_surface() != p.role.wl());
+            }
+        }
+        self.placed.retain(|p| !moved(p, wanted));
+    }
+
+    /// Every monitor gets again what its number gives it: when one comes or goes the others' numbers change, and the compositor need not say
+    /// anything else about them.
+    fn place_on_all(&mut self, qh: &QueueHandle<State>, except: Option<&wl_output::WlOutput>) {
+        let all: Vec<wl_output::WlOutput> = self.outputs.outputs().filter(|o| Some(o) != except).collect();
+        for o in &all {
+            self.place_on(o, qh);
         }
     }
 
@@ -2337,6 +2369,7 @@ impl OutputHandler for State {
     fn new_output(&mut self, _: &Connection, qh: &QueueHandle<Self>, output: wl_output::WlOutput) {
         outputs_changed(&self.to_render);
         self.place_on(&output, qh);
+        self.place_on_all(qh, None);
     }
     /// What a monitor says about itself (its name, its modes) can arrive after it
     /// does, and one that came without a name was not given its surfaces: here they
@@ -2375,9 +2408,10 @@ impl OutputHandler for State {
             let _ = c.connection.flush();
         }
     }
-    fn output_destroyed(&mut self, _: &Connection, _: &QueueHandle<Self>, output: wl_output::WlOutput) {
+    fn output_destroyed(&mut self, _: &Connection, qh: &QueueHandle<Self>, output: wl_output::WlOutput) {
         outputs_changed(&self.to_render);
         self.remove_from(&output);
+        self.place_on_all(qh, Some(&output));
     }
 }
 
