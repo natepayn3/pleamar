@@ -3045,6 +3045,10 @@ pub struct Sheet {
     /// capture, or for the compositor to let go of a buffer— and what is
     /// behind its glass, when a capture comes in. Boxes in the scene's plane.
     pub owed_damage: Vec<[f32; 4]>,
+    /// A capture of what is behind its glass arrived and is not painted yet: it is painted at the
+    /// monitor's pace, whatever the surface's own `rate:` says (the bar keeps 12 a second at rest,
+    /// and a window dragged under its glass was bent at that pace).
+    pub backdrop_fresh: bool,
     /// Whether it has been painted in this round of the render.
     pub painted_now: bool,
     /// Which piece of the plane and at which scale it has painted, if what it
@@ -3703,7 +3707,7 @@ impl Gpu {
         let (layer_views, layer_group) = Self::make_layers(&self.device, &self.pipeline, self.format, 1, 1, 1);
         let mut l = Sheet {
             id: n.id, frame_no: 0, painted_as: Vec::new(), damage_log: Default::default(), known_as: (0, (0, 0)), kept: None, idle_kept_frames: 0, name: n.name, mhz: n.mhz, scale: n.scale, drives_pace: true, open: true, unseen: false, missed: 0, cleared: false, view: n.view,
-            target: n.target, spare: None, window: n.window, px: (0, 0), uniforms, uniform_group, layer_views, layer_group, layers: 0, idle_layer_frames: 0, blur_rects: Vec::new(), lens: None, own: None, idle_own_frames: 0, wants_lens: false, capture: BackdropCapture::Idle, glass_box: None, glass_rects: Vec::new(), glass_src: Vec::new(), asked_box: [0; 4], capture_asked: std::time::Instant::now(), rate_last: None, capture_taken: long_ago(), capture_owed: false, capture_forced: false, captures_lost: 0, glass_grew: false, watch_replaced: false, owed_damage: Vec::new(), painted_now: false, painted: None, input_region: vec![[-1, -1, -1, -1]], presented: false, keyboard_mode: None,
+            target: n.target, spare: None, window: n.window, px: (0, 0), uniforms, uniform_group, layer_views, layer_group, layers: 0, idle_layer_frames: 0, blur_rects: Vec::new(), lens: None, own: None, idle_own_frames: 0, wants_lens: false, capture: BackdropCapture::Idle, glass_box: None, glass_rects: Vec::new(), glass_src: Vec::new(), asked_box: [0; 4], capture_asked: std::time::Instant::now(), rate_last: None, capture_taken: long_ago(), capture_owed: false, capture_forced: false, captures_lost: 0, glass_grew: false, watch_replaced: false, owed_damage: Vec::new(), backdrop_fresh: false, painted_now: false, painted: None, input_region: vec![[-1, -1, -1, -1]], presented: false, keyboard_mode: None,
         };
         // Frames of our own where the platform makes them, so the compositor
         // is told which piece of each changed: a swapchain's are handed over

@@ -157,6 +157,12 @@ pub struct Lens {
     /// The last capture that came was not the same as the one before it (or was: then the check lets it through).
     pub last_new: bool,
     last_same: bool,
+    /// The card's own look at a capture it holds (`receive`), made the first time one arrives.
+    compare: Option<Compare>,
+    /// The last capture taken in came on the card: the next one on the card is compared with it there.
+    card_last: bool,
+    /// The card's last answer: something behind the glass changed (`Compare`).
+    behind_changed: bool,
     pub bounds: [i32; 4],
     bounds_uniforms: wgpu::Buffer,
     /// A received capture whose background is still to be unmixed: which
@@ -203,6 +209,9 @@ impl Lens {
             confirmed: false,
             last_new: false,
             last_same: false,
+            compare: None,
+            card_last: false,
+            behind_changed: true,
             pending: None,
             bounds: [0; 4],
             bounds_uniforms: d.create_buffer(&wgpu::BufferDescriptor { label: Some("bounds"), size: 32, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }),
@@ -249,12 +258,14 @@ impl Lens {
             said(|c| c.unpresented += 1);
             return false;
         };
-        // A capture without data is one that failed.
-        let Some(data) = d.data else {
+        // A capture without data, nor on the card, is one that failed.
+        let card = d.card.clone();
+        if card.is_none() && d.data.is_none() {
             said(|c| c.failed += 1);
             return false;
-        };
-        let data: &[u8] = (*data).as_ref();
+        }
+        let data: &[u8] = d.data.as_ref().map_or(&[][..], |x| (**x).as_ref());
+        let size = (d.width, d.height);
         self.read_judging(g);
         // Counted even if it brings nothing new: a still background must not
         // keep the warm-up going for ever. During the warm-up none is skipped
@@ -267,8 +278,11 @@ impl Lens {
         // changes the lens, and so on without end. One byte in thirteen is
         // looked at, which is enough to know whether something has moved.
         // A capture of parts looks at the parts only: the rest of the buffer holds nothing.
-        let parts: Vec<[u32; 4]> = d.rects.iter().copied().filter(|r| r[2] > 0 && r[3] > 0 && r[0] + r[2] <= d.width && r[1] + r[3] <= d.height).collect();
-        let sample: Vec<u8> = if parts.is_empty() {
+        let parts: Vec<[u32; 4]> = if card.is_some() { Vec::new() } else { d.rects.iter().copied().filter(|r| r[2] > 0 && r[3] > 0 && r[0] + r[2] <= d.width && r[1] + r[3] <= d.height).collect() };
+        // A capture on the card is looked at there, one pixel in nine (`Compare`): the processor never reads it.
+        let sample: Vec<u8> = if card.is_some() {
+            Vec::new()
+        } else if parts.is_empty() {
             data.iter().copied().step_by(13).collect()
         } else {
             let mut all = Vec::new();
@@ -289,7 +303,26 @@ impl Lens {
         // compositor's on top of the glass —another bar's piece hanging over it,
         // a notice—, which no capture will ever take away, and refusing them all
         // left the glass with its first background for ever, black (#113).
-        let same = bounds == self.bounds && sample.len() == self.sample.len() && sample.iter().zip(&self.sample).all(|(a, b)| a.abs_diff(*b) <= 3);
+        let same = if let Some(card) = &card {
+            // What is behind, compared with the background already taken in: our own drawing taken out.
+            let (lw, lh) = self.px;
+            let rect = [
+                (bounds[0] as f32 * scale).floor().clamp(0.0, lw as f32),
+                (bounds[1] as f32 * scale).floor().clamp(0.0, lh as f32),
+                (bounds[2] as f32 * scale).ceil(),
+                (bounds[3] as f32 * scale).ceil(),
+            ];
+            // The card's answer about the capture before this one (it is never waited for): changed, or
+            // nothing came yet and the last one said it had. This one is asked about now.
+            let compare = self.compare.get_or_insert_with(|| Compare::new(&g.device));
+            if let Some(changed) = compare.answer(g) {
+                self.behind_changed = changed;
+            }
+            compare.ask(g, &card.texture, &self.canvases[presented].1, &self.backgrounds[self.current].1, rect, d.opacity);
+            bounds == self.bounds && self.ready && !self.warming() && !self.behind_changed
+        } else {
+            !self.card_last && bounds == self.bounds && sample.len() == self.sample.len() && sample.iter().zip(&self.sample).all(|(a, b)| a.abs_diff(*b) <= 3)
+        };
         let no = said(|c| {
             c.arrived += 1;
             c.n += 1;
@@ -306,7 +339,9 @@ impl Lens {
                 "new"
             };
             detail(no, || format!("lens · capture #{no} · {}×{} px{} · opacity {:.2} · {how}", d.width, d.height, if d.rects.is_empty() { String::new() } else { format!(" · {} parts", d.rects.len()) }, d.opacity));
-            keep_picture(no, "capture", d.width, d.height, d.stride, data, true);
+            if card.is_none() {
+                keep_picture(no, "capture", d.width, d.height, d.stride, data, true);
+            }
         }
         if same && !self.confirmed && self.ready {
             self.confirmed = true;
@@ -321,14 +356,18 @@ impl Lens {
         self.last_same = same;
         self.sample = sample;
         self.bounds = bounds;
+        self.card_last = card.is_some();
         let dev = &g.device;
-        let size = (d.width, d.height);
         if self.capture.as_ref().is_none_or(|f| f.2 != size) {
             let (tx, v) = texture(dev, "capture", size, wgpu::TextureFormat::Bgra8Unorm, wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST);
             self.capture = Some((tx, v, size));
         }
         let capture = self.capture.as_ref().unwrap();
-        if parts.is_empty() {
+        if let Some(card) = &card {
+            let mut enc = dev.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("a capture copied on the card") });
+            enc.copy_texture_to_texture(card.texture.as_image_copy(), capture.0.as_image_copy(), wgpu::Extent3d { width: size.0, height: size.1, depth_or_array_layers: 1 });
+            g.queue.submit([enc.finish()]);
+        } else if parts.is_empty() {
             g.queue.write_texture(
                 capture.0.as_image_copy(),
                 data,
@@ -1238,5 +1277,173 @@ mod tests {
         assert_eq!(capture_interval(Some(0.25)), Duration::from_secs_f32(0.25));
         assert_eq!(capture_interval(Some(0.0)), Duration::from_secs_f32(INTERVAL_RANGE.0));
         assert_eq!(capture_interval(Some(1e6)), Duration::from_secs_f32(INTERVAL_RANGE.1));
+    }
+}
+
+
+/// Whether what is behind the glass changed, on the card: the new capture is unmixed against the canvas it
+/// was taken with (as `backdrop.wgsl` does) and compared with the background already taken in, one pixel in
+/// nine, by more than a few levels. Comparing the raw captures counted our own drawing as a change —a frame
+/// that ripples by itself changed every capture—, and a glass that paints again for every new capture then
+/// painted at the monitor's pace for nothing. Only four bytes come back: the capture never leaves the card.
+struct Compare {
+    pipeline: wgpu::ComputePipeline,
+    layout: wgpu::BindGroupLayout,
+    count: wgpu::Buffer,
+    uniforms: wgpu::Buffer,
+    sampler: wgpu::Sampler,
+    /// Answers on their way back from the card, oldest first: the render never waits for one (waiting held
+    /// each frame 10-20 ms behind the card's other work); each capture is judged by the last answer that came.
+    asked: std::collections::VecDeque<(wgpu::Buffer, std::sync::Arc<std::sync::atomic::AtomicU32>)>,
+}
+
+const COMPARE_SHADER: &str = r#"
+@group(0) @binding(0) var fresh: texture_2d<f32>;
+@group(0) @binding(1) var canvas: texture_2d<f32>;
+@group(0) @binding(2) var kept: texture_2d<f32>;
+@group(0) @binding(3) var linear_s: sampler;
+@group(0) @binding(4) var<storage, read_write> n: atomic<u32>;
+// Where the capture falls on the canvas, in its pixels (x, y, width, height), and our opacity.
+struct Box { rect: vec4<f32>, opacity: f32, _a: f32, _b: f32, _c: f32 };
+@group(0) @binding(5) var<uniform> b: Box;
+@compute @workgroup_size(16, 16) fn main(@builtin(global_invocation_id) g: vec3<u32>) {
+    let pos = b.rect.xy + vec2<f32>(g.xy * 3u) + 0.5;
+    if (pos.x >= b.rect.x + b.rect.z || pos.y >= b.rect.y + b.rect.w) { return; }
+    let px = vec2<i32>(pos);
+    let dims = vec2<i32>(textureDimensions(canvas));
+    if (px.x >= dims.x || px.y >= dims.y) { return; }
+    let f = textureSampleLevel(fresh, linear_s, (pos - b.rect.xy) / b.rect.zw, 0.0).rgb;
+    let s = textureLoad(canvas, px, 0) * b.opacity;
+    let remaining = 1.0 - s.a;
+    // Only where we draw —the glass and what is on it—: what is behind is read there and nowhere else. A
+    // window or a video elsewhere on the monitor changes the capture (it is of the whole box) and not the glass.
+    // Under what we draw opaque nothing behind can be seen, nor changes.
+    if (s.a < 0.05 || remaining < 0.1) { return; }
+    let k = textureLoad(kept, px, 0);
+    // Nothing known there yet: anything is new.
+    if (k.a < 0.5) { atomicAdd(&n, 1u); return; }
+    let behind = (f - s.rgb) / remaining;
+    // Unmixing divides the rounding by what is left: so does the margin.
+    let margin = (3.5 + 1.0 / remaining) / 255.0;
+    if (any(abs(behind - k.rgb) > vec3<f32>(margin))) {
+        atomicAdd(&n, 1u);
+    }
+}
+"#;
+
+impl Compare {
+    fn new(d: &wgpu::Device) -> Compare {
+        let tex = |binding, filterable| wgpu::BindGroupLayoutEntry { binding, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable }, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false }, count: None };
+        let layout = d.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("what is behind compared"),
+            entries: &[
+                tex(0, true),
+                tex(1, false),
+                tex(2, false),
+                wgpu::BindGroupLayoutEntry { binding: 3, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering), count: None },
+                wgpu::BindGroupLayoutEntry { binding: 4, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: wgpu::BufferSize::new(4) }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 5, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: wgpu::BufferSize::new(32) }, count: None },
+            ],
+        });
+        let pl = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("what is behind compared"), bind_group_layouts: &[Some(&layout)], immediate_size: 0 });
+        let shader = d.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("what is behind compared"), source: wgpu::ShaderSource::Wgsl(COMPARE_SHADER.into()) });
+        let pipeline = d.create_compute_pipeline(&wgpu::ComputePipelineDescriptor { label: Some("what is behind compared"), layout: Some(&pl), module: &shader, entry_point: Some("main"), compilation_options: Default::default(), cache: None });
+        let count = d.create_buffer(&wgpu::BufferDescriptor { label: Some("pixels that differ"), size: 4, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+        let uniforms = d.create_buffer(&wgpu::BufferDescriptor { label: Some("where the capture falls"), size: 32, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+        let sampler = d.create_sampler(&wgpu::SamplerDescriptor { mag_filter: wgpu::FilterMode::Linear, min_filter: wgpu::FilterMode::Linear, address_mode_u: wgpu::AddressMode::ClampToEdge, address_mode_v: wgpu::AddressMode::ClampToEdge, ..Default::default() });
+        Compare { pipeline, layout, count, uniforms, sampler, asked: Default::default() }
+    }
+
+    /// Asks the card whether what is behind changed in `fresh` (it answers later: see `answer`). `rect`: where the
+    /// capture falls on the canvas, in its pixels; `canvas`: what we presented when it was taken; `kept`: the
+    /// background taken in last.
+    fn ask(&mut self, g: &crate::gpu::Gpu, fresh: &wgpu::Texture, canvas: &wgpu::TextureView, kept: &wgpu::TextureView, rect: [f32; 4], opacity: f32) {
+        let (dev, queue) = (&g.device, &g.queue);
+        // Too many unanswered (a card that stopped answering): the oldest are forgotten.
+        while self.asked.len() >= 6 {
+            self.asked.pop_front();
+        }
+        let fv = fresh.create_view(&Default::default());
+        let group = dev.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &self.layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&fv) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(canvas) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(kept) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                wgpu::BindGroupEntry { binding: 4, resource: self.count.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 5, resource: self.uniforms.as_entire_binding() },
+            ],
+        });
+        queue.write_buffer(&self.count, 0, &[0; 4]);
+        queue.write_buffer(&self.uniforms, 0, bytemuck::cast_slice(&[rect[0], rect[1], rect[2], rect[3], opacity, 0.0, 0.0, 0.0]));
+        let mut enc = dev.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("what is behind compared") });
+        {
+            let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("what is behind compared"), timestamp_writes: None });
+            pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(0, &group, &[]);
+            pass.dispatch_workgroups((rect[2].max(1.0) as u32).div_ceil(3).div_ceil(16), (rect[3].max(1.0) as u32).div_ceil(3).div_ceil(16), 1);
+        }
+        let read = dev.create_buffer(&wgpu::BufferDescriptor { label: Some("pixels that differ, to read"), size: 4, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+        enc.copy_buffer_to_buffer(&self.count, 0, &read, 0, 4);
+        queue.submit([enc.finish()]);
+        // u32::MAX: not yet; 0: mapped; 1: failed.
+        let state = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(u32::MAX));
+        let set = state.clone();
+        read.slice(..).map_async(wgpu::MapMode::Read, move |r| set.store(if r.is_ok() { 0 } else { 1 }, std::sync::atomic::Ordering::Release));
+        self.asked.push_back((read, state));
+    }
+
+    /// The newest answer that has come back since the last time it was asked, without waiting: `Some(true)` if
+    /// what is behind changed (or the card could not say), `None` if none has come.
+    fn answer(&mut self, g: &crate::gpu::Gpu) -> Option<bool> {
+        let _ = g.device.poll(wgpu::PollType::Poll);
+        let mut newest = None;
+        while let Some((_, state)) = self.asked.front() {
+            match state.load(std::sync::atomic::Ordering::Acquire) {
+                u32::MAX => break,
+                0 => {
+                    let (read, _) = self.asked.pop_front().unwrap();
+                    let n = read.slice(..).get_mapped_range().map(|v| u32::from_ne_bytes(v[..4].try_into().unwrap())).unwrap_or(u32::MAX);
+                    read.unmap();
+                    compare_said(n);
+                    // A few stray pixels (the edge of something of ours that moved, rounding) are not a change behind.
+                    newest = Some(n > 4);
+                }
+                _ => {
+                    self.asked.pop_front();
+                    newest = Some(true);
+                }
+            }
+        }
+        newest
+    }
+}
+
+/// `PLEAMAR_TIMING=1`: how many captures on the card said something behind the glass changed, every 300.
+fn compare_said(n: u32) {
+    if !crate::gpu::timing_enabled() {
+        return;
+    }
+    static SEEN: std::sync::Mutex<(u32, u32, u64)> = std::sync::Mutex::new((0, 0, 0));
+    let mut s = SEEN.lock().unwrap();
+    s.0 += 1;
+    if n > 4 {
+        s.1 += 1;
+    }
+    s.2 += n as u64;
+    if s.0 >= 300 {
+        eprintln!("lens · of {} captures on the card, {} changed behind the glass ({:.0} pixels differing on average)", s.0, s.1, s.2 as f64 / s.0 as f64);
+        *s = (0, 0, 0);
+    }
+}
+
+#[cfg(test)]
+mod compare_tests {
+    #[test]
+    fn the_compare_shader_is_valid_wgsl() {
+        let module = naga::front::wgsl::parse_str(super::COMPARE_SHADER).expect("parses");
+        naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all()).validate(&module).expect("validates");
     }
 }

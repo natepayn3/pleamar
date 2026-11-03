@@ -615,19 +615,26 @@ pub struct Exported {
 /// CCS) need the image handed over to the other process with a barrier wgpu
 /// does not make, and a frame cleared to transparent could come out garbled.
 pub fn export(device: &wgpu::Device, size: (u32, u32), modifiers: &[u64]) -> Result<Exported, String> {
-    export_as(device, size, modifiers, false)
+    export_as(device, size, modifiers, false, false)
 }
 
 /// The same, the other way round: a texture the compositor paints in (a
 /// window it copies for `thumbnails.live`) and the card reads from. Its
 /// content is the compositor's, never cleared here.
 pub fn export_to_read(device: &wgpu::Device, size: (u32, u32), modifiers: &[u64]) -> Result<Exported, String> {
-    export_as(device, size, modifiers, true)
+    export_as(device, size, modifiers, true, false)
 }
 
-fn export_as(device: &wgpu::Device, size: (u32, u32), modifiers: &[u64], read: bool) -> Result<Exported, String> {
+/// The same, and the card can also copy from it: where the compositor leaves
+/// a capture of what is behind a glass (`lens.rs`), which is copied on the
+/// card to the lens's own texture, never read back by the processor.
+pub fn export_to_capture(device: &wgpu::Device, size: (u32, u32), modifiers: &[u64]) -> Result<Exported, String> {
+    export_as(device, size, modifiers, true, true)
+}
+
+fn export_as(device: &wgpu::Device, size: (u32, u32), modifiers: &[u64], read: bool, copy_src: bool) -> Result<Exported, String> {
     let extent = wgpu::Extent3d { width: size.0.max(1), height: size.1.max(1), depth_or_array_layers: 1 };
-    let uses = if read { wgpu::TextureUses::RESOURCE } else { wgpu::TextureUses::COLOR_TARGET | wgpu::TextureUses::COPY_DST };
+    let uses = if read { wgpu::TextureUses::RESOURCE | if copy_src { wgpu::TextureUses::COPY_SRC } else { wgpu::TextureUses::empty() } } else { wgpu::TextureUses::COLOR_TARGET | wgpu::TextureUses::COPY_DST };
     let hal_desc = wgpu::hal::TextureDescriptor {
         label: Some("a frame of ours"),
         size: extent,
@@ -643,7 +650,7 @@ fn export_as(device: &wgpu::Device, size: (u32, u32), modifiers: &[u64], read: b
     // wgpu, which frees them (the callback) once nothing uses them.
     let (hal_texture, fd, modifier, planes) = unsafe {
         let hal = device.as_hal::<Vulkan>().ok_or("the card is not driven with Vulkan")?;
-        let (image, memory, fd, modifier, planes) = export_image(&hal, extent, modifiers, read)?;
+        let (image, memory, fd, modifier, planes) = export_image(&hal, extent, modifiers, read, copy_src)?;
         let raw = hal.raw_device().clone();
         let free: wgpu::hal::DropCallback = Box::new(move || {
             raw.destroy_image(image, None);
@@ -658,7 +665,7 @@ fn export_as(device: &wgpu::Device, size: (u32, u32), modifiers: &[u64], read: b
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: wgpu::TextureFormat::Bgra8Unorm,
-        usage: if read { wgpu::TextureUsages::TEXTURE_BINDING } else { wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_DST },
+        usage: if read { wgpu::TextureUsages::TEXTURE_BINDING | if copy_src { wgpu::TextureUsages::COPY_SRC } else { wgpu::TextureUsages::empty() } } else { wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_DST },
         view_formats: &[],
     };
     // SAFETY: made on this device, as `desc` says.
@@ -670,14 +677,16 @@ fn export_as(device: &wgpu::Device, size: (u32, u32), modifiers: &[u64], read: b
 /// and its planes.
 type ExportedImage = (vk::Image, vk::DeviceMemory, std::os::fd::OwnedFd, u64, Vec<(u32, u32)>);
 
-unsafe fn export_image(hal: &wgpu::hal::vulkan::Device, extent: wgpu::Extent3d, modifiers: &[u64], read: bool) -> Result<ExportedImage, String> {
+unsafe fn export_image(hal: &wgpu::hal::vulkan::Device, extent: wgpu::Extent3d, modifiers: &[u64], read: bool, copy_src: bool) -> Result<ExportedImage, String> {
     use std::os::fd::FromRawFd;
     let raw = hal.raw_device();
     let instance = hal.shared_instance().raw_instance();
     let pd = hal.raw_physical_device();
     // Of the layouts the compositor takes, those the card paints in (or reads
     // from), of one plane.
-    let (usage, need) = if read {
+    let (usage, need) = if read && copy_src {
+        (vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_SRC, vk::FormatFeatureFlags::SAMPLED_IMAGE | vk::FormatFeatureFlags::TRANSFER_SRC)
+    } else if read {
         (vk::ImageUsageFlags::SAMPLED, vk::FormatFeatureFlags::SAMPLED_IMAGE)
     } else {
         (vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_DST, vk::FormatFeatureFlags::COLOR_ATTACHMENT | vk::FormatFeatureFlags::TRANSFER_DST)
