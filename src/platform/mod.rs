@@ -1113,6 +1113,12 @@ pub trait PlatformWindow: Send {
     }
     /// Forget the capture that's on the way: it won't arrive anymore.
     fn cancel_backdrop(&self) {}
+    /// When the last capture asked for really went to the compositor: a platform that sends it
+    /// after the frame has reached it (once the card has finished that frame) says `Some(None)`
+    /// while it has not gone yet. `None`, the moment it was asked.
+    fn capture_sent(&self) -> Option<Option<std::time::Instant>> {
+        None
+    }
     /// On which monitor it is, by name, and where on it: its top left corner,
     /// logical. `None` where that is not known.
     fn desktop_place(&self) -> Option<(String, (i32, i32))> {

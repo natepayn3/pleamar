@@ -5116,6 +5116,16 @@ thread_local! {
 }
 
 impl Sheet {
+    /// What the time a capture takes to come back counts from: when it was asked, or, where the
+    /// platform sends it only once the frame has reached the compositor, when it went (now, while it waits).
+    pub fn capture_since(&self) -> std::time::Instant {
+        match self.window.capture_sent() {
+            None => self.capture_asked,
+            Some(None) => std::time::Instant::now(),
+            Some(Some(t)) => t.max(self.capture_asked),
+        }
+    }
+
     /// Its monitor's refresh in mHz, for pacing: 60 Hz where the compositor
     /// does not tell it (a headless output says 0, and a period of 1 mHz put
     /// the render to sleep for a thousand seconds after its first frame).
