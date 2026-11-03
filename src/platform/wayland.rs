@@ -365,6 +365,9 @@ struct BackdropTarget {
     frames: Mutex<Vec<ZwlrScreencopyFrameV1>>,
     /// When the last one asked for went to the compositor; `None` while it waits for its frame.
     sent: Mutex<Option<std::time::Instant>>,
+    /// Which capture is the current one: `cancel_backdrop` moves it on, so a capture still waiting in the
+    /// frames-shown queue when it was forgotten is not sent after all, even if another was asked meanwhile.
+    asked: std::sync::atomic::AtomicU64,
 }
 
 /// How to know where a surface is on its monitor.
@@ -379,7 +382,7 @@ enum BackdropKind {
 
 impl BackdropTarget {
     fn new(id: u32, output: Option<(wl_output::WlOutput, String)>, kind: BackdropKind) -> Arc<BackdropTarget> {
-        Arc::new(BackdropTarget { id, output: Mutex::new(output), position: Mutex::new(None), size: Mutex::new((0, 0)), kind, last_asked: Mutex::new(None), opacity: Mutex::new(1.0), in_flight: std::sync::atomic::AtomicBool::new(false), frames: Mutex::new(Vec::new()), sent: Mutex::new(Some(std::time::Instant::now())) })
+        Arc::new(BackdropTarget { id, output: Mutex::new(output), position: Mutex::new(None), size: Mutex::new((0, 0)), kind, last_asked: Mutex::new(None), opacity: Mutex::new(1.0), in_flight: std::sync::atomic::AtomicBool::new(false), frames: Mutex::new(Vec::new()), sent: Mutex::new(Some(std::time::Instant::now())), asked: std::sync::atomic::AtomicU64::new(0) })
     }
 
     /// On which monitor and where, now. With Hyprland it gets asked, at most
@@ -812,15 +815,24 @@ impl PlatformWindow for WaylandWindow {
         // Without the cursor: the glass doesn't refract it, it goes on top.
         let target = d.clone();
         let (d, qh, rects) = (d.clone(), self.qh.clone(), rects.to_vec());
+        let this = d.asked.load(Ordering::Relaxed);
         let ask = move || {
+            // Forgotten (`cancel_backdrop`) before its turn came: not asked at all. Not even if `in_flight` is
+            // set again: that is a newer capture's, which is behind this one in the queue and goes itself.
+            if d.asked.load(Ordering::Relaxed) != this {
+                return;
+            }
             // From here the compositor has it (or it is not asked at all): its time to arrive counts from now.
             *d.sent.lock().unwrap() = Some(std::time::Instant::now());
-            // Forgotten (`cancel_backdrop`) before its turn came: not asked at all.
             if !d.in_flight.load(Ordering::Relaxed) || !output.is_alive() {
                 return;
             }
             let Some((manager, _)) = SCREENCOPY.get() else { return };
             let mut frames = d.frames.lock().unwrap();
+            // (Again under the lock `cancel_backdrop` takes: forgotten while on its way here, none of it is asked.)
+            if d.asked.load(Ordering::Relaxed) != this {
+                return;
+            }
             if rects.len() >= 2 && !PARTS_BROKEN.load(Ordering::Relaxed) {
                 let parts = Arc::new(Mutex::new(Parts { hull: bounds, rects: rects.clone(), valid: Vec::new(), over: false }));
                 for (k, r) in rects.iter().enumerate() {
@@ -853,9 +865,14 @@ impl PlatformWindow for WaylandWindow {
 
     fn cancel_backdrop(&self) {
         let Some(d) = &self.backdrop else { return };
-        for m in d.frames.lock().unwrap().drain(..) {
+        let mut frames = d.frames.lock().unwrap();
+        // One still in the queue stays there unsent; nothing is on the way any more.
+        d.asked.fetch_add(1, Ordering::Relaxed);
+        for m in frames.drain(..) {
             m.destroy();
         }
+        drop(frames);
+        *d.sent.lock().unwrap() = Some(std::time::Instant::now());
         d.in_flight.store(false, Ordering::Relaxed);
     }
 
