@@ -4948,10 +4948,10 @@ pub fn run(
             // that stays still from its first frame never saw its background.
             // The same for a capture it owed and asked without presenting (`capture_forced`).
             let unseen = (l.capture_forced || l.lens.as_ref().is_some_and(|x| x.warming())) && l.capture == crate::gpu::BackdropCapture::AfterPresent;
-            if unseen && l.capture_asked.elapsed() < Duration::from_millis(100) {
-                appointments.push(l.capture_asked + Duration::from_millis(101));
+            if unseen && l.capture_since().elapsed() < Duration::from_millis(100) {
+                appointments.push(l.capture_since() + Duration::from_millis(101));
             }
-            let nudge = unseen && l.capture_asked.elapsed() >= Duration::from_millis(100);
+            let nudge = unseen && l.capture_since().elapsed() >= Duration::from_millis(100);
             let its_turn = !l.open || all_changed || nudge || l.painted != Some(where_) || !l.owed_damage.is_empty() || changed.iter().any(|b| b[0] < v[2] && b[2] > v[0] && b[1] < v[3] && b[3] > v[1]);
             // A round it skips: what changed in it is owed, if it is known
             // where; if not, it is painted whole when its turn comes.
@@ -4987,7 +4987,7 @@ pub fn run(
             if l.lens.is_some() {
                 match l.capture {
                     // It arrives in less than a refresh. If it takes longer, it has been lost.
-                    crate::gpu::BackdropCapture::AfterPresent if l.capture_asked.elapsed() < Duration::from_millis(100) => {
+                    crate::gpu::BackdropCapture::AfterPresent if l.capture_since().elapsed() < Duration::from_millis(100) => {
                         skip(l);
                         up_to_date += 1;
                         continue;
@@ -5143,8 +5143,8 @@ pub fn run(
         // nudge for it. It is asked again, owed; and a monitor that answers none (switched off) less and less often.
         for l in sheets.iter_mut().filter(|l| l.lens.is_some() && l.capture == crate::gpu::BackdropCapture::AfterPresent) {
             let lost_after = crate::lens::capture_lost_after(l.captures_lost);
-            if l.capture_asked.elapsed() < lost_after {
-                appointments.push(l.capture_asked + lost_after);
+            if l.capture_since().elapsed() < lost_after {
+                appointments.push(l.capture_since() + lost_after);
                 continue;
             }
             crate::lens::log_still(l.id, "a capture never answered: asked again");
@@ -5170,7 +5170,7 @@ pub fn run(
             // A watch the compositor has not answered for a while: a plain capture instead, which it answers
             // the next time it paints the monitor (see `lens::WATCH_PATIENCE`, #118).
             if l.capture == crate::gpu::BackdropCapture::Watching && !crate::lens::watch_heard() {
-                let due = l.capture_asked + crate::lens::WATCH_PATIENCE;
+                let due = l.capture_since() + crate::lens::WATCH_PATIENCE;
                 if Instant::now() >= due {
                     crate::lens::log_still(l.id, "a watch not answered: a plain capture instead");
                     l.cancel_backdrop();
@@ -5179,7 +5179,7 @@ pub fn run(
                     l.watch_replaced = l.capture == crate::gpu::BackdropCapture::AfterPresent;
                     l.capture_forced = l.watch_replaced;
                     // (And a round to do it: nothing else may wake the render.)
-                    appointments.push(l.capture_asked + Duration::from_millis(101));
+                    appointments.push(l.capture_since() + Duration::from_millis(101));
                 } else {
                     appointments.push(due);
                 }
@@ -5200,7 +5200,7 @@ pub fn run(
                         l.capture_owed = false;
                         l.capture_forced = true;
                         // (A round for the nudge, if it is not answered: nothing else may wake the render.)
-                        appointments.push(l.capture_asked + Duration::from_millis(101));
+                        appointments.push(l.capture_since() + Duration::from_millis(101));
                     }
                 }
                 // Watched, unless the compositor has shown it does not say what changes: then a plain capture
@@ -5213,13 +5213,13 @@ pub fn run(
                     } else {
                         l.request_backdrop(false);
                         l.capture_forced = l.capture == crate::gpu::BackdropCapture::AfterPresent;
-                        appointments.push(l.capture_asked + Duration::from_millis(101));
+                        appointments.push(l.capture_since() + Duration::from_millis(101));
                     }
                 }
                 crate::lens::Still::Watch => {
                     l.request_backdrop(true);
                     if l.capture == crate::gpu::BackdropCapture::Watching && !crate::lens::watch_heard() {
-                        appointments.push(l.capture_asked + crate::lens::WATCH_PATIENCE);
+                        appointments.push(l.capture_since() + crate::lens::WATCH_PATIENCE);
                     }
                 }
             }

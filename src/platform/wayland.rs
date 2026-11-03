@@ -178,6 +178,10 @@ enum Show {
     /// A commit of what the window has changed meanwhile (its input region, its
     /// keyboard), after the frames asked before it.
     Commit,
+    /// Something to send the compositor once the frames asked before have reached it: a
+    /// capture of the screen with the last of them on it, asked without the render
+    /// waiting for the card to finish that frame.
+    Run(Box<dyn FnOnce() + Send>),
 }
 
 const OWN_FRAMES: usize = 3;
@@ -276,6 +280,7 @@ impl gpu::Frames for OwnFrames {
                         }
                         Show::Forget(buffers) => buffers.iter().for_each(|b| b.destroy()),
                         Show::Commit => wl.commit(),
+                        Show::Run(f) => f(),
                         Show::Settled(done) => {
                             if let Some(c) = &connection {
                                 let _ = c.flush();
@@ -302,6 +307,13 @@ impl gpu::Frames for OwnFrames {
     /// asked before the frame reached the compositor, it showed the one
     /// before, and the lens unmixed the wrong picture.
     fn settle(&mut self) {
+        // Nothing to wait for: a window with frames of its own sends its capture through
+        // the same queue (`capture_backdrop`), after the frame. Waiting here held the render
+        // for as long as the card took to finish the frame —behind other programs' work on
+        // a shared card, twenty milliseconds and more— on every capture.
+        if DEFERRED_CAPTURE.load(Ordering::Relaxed) {
+            return;
+        }
         let Some(tx) = &self.to_show else { return };
         let (done, wait) = std::sync::mpsc::channel();
         if tx.send(Show::Settled(done)).is_ok() {
@@ -351,6 +363,11 @@ struct BackdropTarget {
     in_flight: std::sync::atomic::AtomicBool,
     /// The captures on the way (one per part of the box), so they can be forgotten.
     frames: Mutex<Vec<ZwlrScreencopyFrameV1>>,
+    /// When the last one asked for went to the compositor; `None` while it waits for its frame.
+    sent: Mutex<Option<std::time::Instant>>,
+    /// Which capture is the current one: `cancel_backdrop` moves it on, so a capture still waiting in the
+    /// frames-shown queue when it was forgotten is not sent after all, even if another was asked meanwhile.
+    asked: std::sync::atomic::AtomicU64,
 }
 
 /// How to know where a surface is on its monitor.
@@ -365,7 +382,7 @@ enum BackdropKind {
 
 impl BackdropTarget {
     fn new(id: u32, output: Option<(wl_output::WlOutput, String)>, kind: BackdropKind) -> Arc<BackdropTarget> {
-        Arc::new(BackdropTarget { id, output: Mutex::new(output), position: Mutex::new(None), size: Mutex::new((0, 0)), kind, last_asked: Mutex::new(None), opacity: Mutex::new(1.0), in_flight: std::sync::atomic::AtomicBool::new(false), frames: Mutex::new(Vec::new()) })
+        Arc::new(BackdropTarget { id, output: Mutex::new(output), position: Mutex::new(None), size: Mutex::new((0, 0)), kind, last_asked: Mutex::new(None), opacity: Mutex::new(1.0), in_flight: std::sync::atomic::AtomicBool::new(false), frames: Mutex::new(Vec::new()), sent: Mutex::new(Some(std::time::Instant::now())), asked: std::sync::atomic::AtomicU64::new(0) })
     }
 
     /// On which monitor and where, now. With Hyprland it gets asked, at most
@@ -473,6 +490,9 @@ struct Parts {
     over: bool,
 }
 
+/// A capture of what is behind goes through the frames-shown queue, after the frame, instead of
+/// the render waiting for that frame to reach the compositor (`PLEAMAR_SYNC_CAPTURE=1` puts the old wait back, to compare).
+static DEFERRED_CAPTURE: std::sync::LazyLock<std::sync::atomic::AtomicBool> = std::sync::LazyLock::new(|| std::sync::atomic::AtomicBool::new(std::env::var_os("PLEAMAR_SYNC_CAPTURE").is_none()));
 /// Set when the parts of a capture did not fit together (a size the compositor rounded another way): from
 /// then on the box is captured whole, as it always was.
 static PARTS_BROKEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -769,7 +789,7 @@ impl PlatformWindow for WaylandWindow {
     }
 
     fn capture_backdrop(&self, bounds: [i32; 4], rects: &[[i32; 4]], on_change: bool) -> bool {
-        let (Some(d), Some((manager, _))) = (&self.backdrop, SCREENCOPY.get()) else { return false };
+        let (Some(d), Some(_)) = (&self.backdrop, SCREENCOPY.get()) else { return false };
         if d.in_flight.load(Ordering::Relaxed) {
             crate::lens::log_not_asked(d.id, "one is still on the way");
             return false;
@@ -793,23 +813,66 @@ impl PlatformWindow for WaylandWindow {
             return false;
         }
         // Without the cursor: the glass doesn't refract it, it goes on top.
-        let mut frames = d.frames.lock().unwrap();
-        if rects.len() >= 2 && !PARTS_BROKEN.load(Ordering::Relaxed) {
-            let parts = Arc::new(Mutex::new(Parts { hull: bounds, rects: rects.to_vec(), valid: Vec::new(), over: false }));
-            for (k, r) in rects.iter().enumerate() {
-                frames.push(manager.capture_output_region(0, &output, x + r[0], y + r[1], r[2], r[3], &self.qh, CaptureFor { target: d.clone(), on_change, format: Mutex::new(None), part: Some((parts.clone(), k)) }));
+        let target = d.clone();
+        let (d, qh, rects) = (d.clone(), self.qh.clone(), rects.to_vec());
+        let this = d.asked.load(Ordering::Relaxed);
+        let ask = move || {
+            // Forgotten (`cancel_backdrop`) before its turn came: not asked at all. Not even if `in_flight` is
+            // set again: that is a newer capture's, which is behind this one in the queue and goes itself.
+            if d.asked.load(Ordering::Relaxed) != this {
+                return;
             }
-        } else {
-            frames.push(manager.capture_output_region(0, &output, x + bounds[0], y + bounds[1], bounds[2], bounds[3], &self.qh, CaptureFor { target: d.clone(), on_change, format: Mutex::new(None), part: None }));
+            // From here the compositor has it (or it is not asked at all): its time to arrive counts from now.
+            *d.sent.lock().unwrap() = Some(std::time::Instant::now());
+            if !d.in_flight.load(Ordering::Relaxed) || !output.is_alive() {
+                return;
+            }
+            let Some((manager, _)) = SCREENCOPY.get() else { return };
+            let mut frames = d.frames.lock().unwrap();
+            // (Again under the lock `cancel_backdrop` takes: forgotten while on its way here, none of it is asked.)
+            if d.asked.load(Ordering::Relaxed) != this {
+                return;
+            }
+            if rects.len() >= 2 && !PARTS_BROKEN.load(Ordering::Relaxed) {
+                let parts = Arc::new(Mutex::new(Parts { hull: bounds, rects: rects.clone(), valid: Vec::new(), over: false }));
+                for (k, r) in rects.iter().enumerate() {
+                    frames.push(manager.capture_output_region(0, &output, x + r[0], y + r[1], r[2], r[3], &qh, CaptureFor { target: d.clone(), on_change, format: Mutex::new(None), part: Some((parts.clone(), k)) }));
+                }
+            } else {
+                frames.push(manager.capture_output_region(0, &output, x + bounds[0], y + bounds[1], bounds[2], bounds[3], &qh, CaptureFor { target: d.clone(), on_change, format: Mutex::new(None), part: None }));
+            }
+        };
+        // With frames of its own, after the frame just handed over, from the thread that hands
+        // it over once the card has finished it: asked before that, it would see the frame before.
+        if DEFERRED_CAPTURE.load(Ordering::Relaxed) {
+            if let Some(tx) = self.shown.lock().unwrap().as_ref() {
+                *target.sent.lock().unwrap() = None;
+                if tx.send(Show::Run(Box::new(ask))).is_ok() {
+                    return true;
+                }
+                *target.sent.lock().unwrap() = Some(std::time::Instant::now());
+                target.in_flight.store(false, Ordering::Relaxed);
+                return false;
+            }
         }
+        ask();
         true
+    }
+
+    fn capture_sent(&self) -> Option<Option<std::time::Instant>> {
+        Some(*self.backdrop.as_ref()?.sent.lock().unwrap())
     }
 
     fn cancel_backdrop(&self) {
         let Some(d) = &self.backdrop else { return };
-        for m in d.frames.lock().unwrap().drain(..) {
+        let mut frames = d.frames.lock().unwrap();
+        // One still in the queue stays there unsent; nothing is on the way any more.
+        d.asked.fetch_add(1, Ordering::Relaxed);
+        for m in frames.drain(..) {
             m.destroy();
         }
+        drop(frames);
+        *d.sent.lock().unwrap() = Some(std::time::Instant::now());
         d.in_flight.store(false, Ordering::Relaxed);
     }
 
