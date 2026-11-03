@@ -182,7 +182,14 @@ fn watch_binary() {
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
-            let error = std::process::Command::new(&me).args(&args).exec();
+            // With the name it was started with: started as `pleamar` from the PATH, it stays `pleamar`, not
+            // `/home/…/.local/bin/pleamar`, so whatever finds it by its command line (`pgrep -f '^pleamar --scene …'`,
+            // a keeper deciding whether to start another) still finds it after an update.
+            let mut command = std::process::Command::new(&me);
+            if let Some(name) = std::env::args_os().next() {
+                command.arg0(name);
+            }
+            let error = command.args(&args).exec();
             eprintln!("pleamar · could not start again: {error}");
         }
         #[cfg(not(unix))]
