@@ -4785,9 +4785,11 @@ pub fn run(
         // sets it, but only when its queue is full: on waking up it
         // accepted two or three frames without waiting and the loop presented them in two
         // milliseconds; there, never more than one frame per period.
-        // How long this round waits on purpose —its turn, the monitor, the compositor's notice, the
-        // scene's own `rate:`—, so that a frame is only called slow for what it took itself.
-        let wait_from = Instant::now();
+        // How long this round waits on purpose —the clock's step, which a scene's `rate:` slows, and the
+        // once a second of a surface the compositor is not showing—, so that a frame is only called slow for
+        // what it took itself. Not the wait for the compositor's notice of a surface it shows: a compositor
+        // that is late is a slow frame on screen, and the telltale is there to see it.
+        let mut paced = Duration::ZERO;
         if !op.no_vsync && !op.naive {
             let right_now = Instant::now();
             if g.uses_mailbox() {
@@ -4805,6 +4807,7 @@ pub fn run(
                 // and if a frame reaches it right after, it composes again and notifies
                 // straight away: two frames per refresh—, but it does say something else: whether
                 // anyone is watching.
+                let clock_from = Instant::now();
                 if next_frame > right_now {
                     // While waiting, the capture that a sheet with a lens
                     // needed in order to paint may arrive: then it is painted right away, without waiting
@@ -4846,12 +4849,14 @@ pub fn run(
                 } else {
                     next_frame = right_now + period;
                 }
+                paced += clock_from.elapsed();
                 // What it is not showing —a monitor that is off, a window on another
                 // workspace— it does not notify. After three waits in vain, it paints once
                 // a second instead of 60 or 165 times for nobody.
                 if let Some(id) = frame_requested {
                     let patience = if missed_notices >= 3 { Duration::from_secs(1) } else { (period * 3).max(Duration::from_millis(50)) };
-                    let limit = Instant::now() + patience;
+                    let (unseen_pace, notice_from) = (missed_notices >= 3, Instant::now());
+                    let limit = notice_from + patience;
                     while !frame_ready {
                         let left = limit.saturating_duration_since(Instant::now());
                         if left.is_zero() {
@@ -4888,6 +4893,9 @@ pub fn run(
                             Err(RecvTimeoutError::Disconnected) => return,
                         }
                     }
+                    if unseen_pace {
+                        paced += notice_from.elapsed();
+                    }
                     if frame_ready {
                         if missed_notices >= 3 {
                             println!("render · the compositor is showing it again");
@@ -4903,10 +4911,11 @@ pub fn run(
                 let since = right_now - last_presented;
                 if since < minimum {
                     std::thread::sleep(minimum - since);
+                    paced += minimum - since;
                 }
             }
         }
-        let waited_ms = wait_from.elapsed().as_secs_f32() * 1000.0;
+        let waited_ms = paced.as_secs_f32() * 1000.0;
         if profiling {
             let n = Instant::now();
             sec_wait = (n - prof_t).as_secs_f64() * 1000.0;
