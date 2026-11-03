@@ -5568,12 +5568,13 @@ fn plain_key(name: &str) -> String {
 /// after painting it another will be asked for); if not, it watches until something changes behind.
 /// Returns whether it has to paint.
 /// What changed in a sheet's piece that it has not painted yet (`Sheet::owed_damage`).
-/// Past a few dozen boxes, one round them all.
+/// Past a few dozen boxes, the few that cover them with the least to spare, as a
+/// frame's pieces are joined: one box round them all was the whole screen for a
+/// frame round its edges, as soon as a bar at 12 a second skipped two rounds.
 fn owe(l: &mut Sheet, rects: impl Iterator<Item = [f32; 4]>) {
     l.owed_damage.extend(rects);
     if l.owed_damage.len() > 32 {
-        let u = l.owed_damage.iter().fold([f32::MAX, f32::MAX, f32::MIN, f32::MIN], |u, b| [u[0].min(b[0]), u[1].min(b[1]), u[2].max(b[2]), u[3].max(b[3])]);
-        l.owed_damage = vec![u];
+        l.owed_damage = crate::gpu::merge_cuts(l.owed_damage.drain(..));
     }
 }
 
@@ -5648,10 +5649,12 @@ fn handle_backdrop(g: &Gpu, sheets: &mut [Sheet], d: Box<crate::platform::Backdr
         crate::lens::watch_came(new);
     }
     if painted {
-        // Only the glass sees it, and the glass is inside the box captured.
-        let (o, b) = (l.view.origin, l.asked_box);
-        let r = [o.0 + b[0] as f32, o.1 + b[1] as f32, o.0 + (b[0] + b[2]) as f32, o.1 + (b[1] + b[3]) as f32];
-        owe(l, [r].into_iter());
+        // Only the glass sees it: the parts of the box that hold glass (`glass_rects`, with
+        // the room its frosting needs), or the box captured when it is all glass. A frame
+        // round the screen captured as one box owed the whole screen on every capture.
+        let o = l.view.origin;
+        let parts = if l.glass_rects.is_empty() { vec![l.asked_box] } else { l.glass_rects.clone() };
+        owe(l, parts.into_iter().map(|b| [o.0 + b[0] as f32, o.1 + b[1] as f32, o.0 + (b[0] + b[2]) as f32, o.1 + (b[1] + b[3]) as f32]));
         true
     } else {
         // Nothing new: the round watches again, once the interval allows.

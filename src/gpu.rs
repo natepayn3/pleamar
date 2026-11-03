@@ -254,15 +254,35 @@ impl PreviousFrame {
                         let (dx, dy) = (b[28].abs(), b[29].abs());
                         let m = melt + b[30].max(0.0) + b[23].max(0.0) + 4.0;
                         for k in mine.filter(|k| changed(*k as f32)) {
-                            for r in [self.shape_bounds.get(k), d.shape_bounds.get(k)].into_iter().flatten() {
-                                if r[2] > r[0] && r[3] > r[1] {
-                                    rects.push([r[0] - m - dx, r[1] - m - dy, r[2] + m + dx, r[3] + m + dy]);
-                                }
-                            }
+                            shape_reach(&self.shapes, &self.shape_bounds, k, (m, dx, dy), rects);
+                            shape_reach(&d.shapes, &d.shape_bounds, k, (m, dx, dy), rects);
                         }
                     }
                 }
-                if change {
+                // A body whose own numbers changed —its shadow or edge light breathing
+                // with the music, its tint— over the same shapes, clips and gradient:
+                // what can look different is where its shapes are, as far as their
+                // melting, its shadow and its border reach, before and after. Its box
+                // is all of that and the gaps between: for a frame round the screen,
+                // the whole screen, repainted on every beat.
+                let same_body = change
+                    && a[0] == 0.0
+                    && b[0] == 0.0
+                    && bits(&a[1..3]) == bits(&b[1..3])
+                    && bits(&a[32..36]) == bits(&b[32..36])
+                    && !b[32..36].iter().any(|&r| changed(r))
+                    && (same_stops || b[15] <= 0.5);
+                if same_body {
+                    let mine = b[1] as usize..b[1] as usize + b[2] as usize;
+                    let melt = mine.clone().flat_map(|k| [self.shapes.get(k * PER_SHAPE + 1), d.shapes.get(k * PER_SHAPE + 1)]).flatten().fold(0.0f32, |m, k| m.max(*k));
+                    let reach = |e: &[f32]| e[30].max(0.0) + e[23].max(0.0);
+                    let m = melt + reach(a).max(reach(b)) + 4.0;
+                    let (dx, dy) = (a[28].abs().max(b[28].abs()), a[29].abs().max(b[29].abs()));
+                    for k in mine {
+                        shape_reach(&self.shapes, &self.shape_bounds, k, (m, dx, dy), rects);
+                        shape_reach(&d.shapes, &d.shape_bounds, k, (m, dx, dy), rects);
+                    }
+                } else if change {
                     rects.push([a[4], a[5], a[6], a[7]]);
                     rects.push([b[4], b[5], b[6], b[7]]);
                 }
@@ -292,6 +312,17 @@ impl PreviousFrame {
     /// (And see `DrawList::forget_kept`.)
     pub fn forget(&mut self) {
         self.valid = false;
+    }
+}
+
+/// Where shape `k` of a draw list paints, grown by `m` and by the shadow's offset:
+/// an outlined box by its band (`FlatShape::outline_cover`), anything else by its box.
+fn shape_reach(shapes: &[f32], bounds: &[[f32; 4]], k: usize, (m, dx, dy): (f32, f32, f32), rects: &mut Vec<[f32; 4]>) {
+    let grow = |r: [f32; 4]| [r[0] - m - dx, r[1] - m - dy, r[2] + m + dx, r[3] + m + dy];
+    let real = |r: &[f32; 4]| r[2] > r[0] && r[3] > r[1];
+    match shapes.get(k * PER_SHAPE..(k + 1) * PER_SHAPE).and_then(|s| crate::shapes::FlatShape::decode(s).outline_cover()) {
+        Some(pieces) => rects.extend(pieces.iter().filter(|r| real(r)).map(|r| grow(*r))),
+        None => rects.extend(bounds.get(k).filter(|r| real(r)).map(|r| grow(*r))),
     }
 }
 
@@ -5062,7 +5093,7 @@ fn grown_for_glass(cuts: Vec<[u32; 4]>, d: &DrawList, view: [f32; 4], scale: f32
     (area < 0.7 * pw * ph).then(|| boxes.iter().map(|b| [b[0] as u32, b[1] as u32, (b[2] - b[0]) as u32, (b[3] - b[1]) as u32]).collect())
 }
 
-fn merge_cuts(rects: impl Iterator<Item = [f32; 4]>) -> Vec<[f32; 4]> {
+pub(crate) fn merge_cuts(rects: impl Iterator<Item = [f32; 4]>) -> Vec<[f32; 4]> {
     let area = |b: &[f32; 4]| (b[2] - b[0]).max(0.0) * (b[3] - b[1]).max(0.0);
     let join = |a: &[f32; 4], b: &[f32; 4]| [a[0].min(b[0]), a[1].min(b[1]), a[2].max(b[2]), a[3].max(b[3])];
     let mut out: Vec<[f32; 4]> = Vec::new();

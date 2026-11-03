@@ -392,6 +392,43 @@ impl FlatShape {
         Some(self.affine.bounds(local))
     }
 
+    /// The shape as `encode` left it in a draw list (the affine goes in inverted).
+    pub fn decode(s: &[f32]) -> FlatShape {
+        let inverse = Affine { m: [s[12], s[13], s[14], s[15]], t: [s[16], s[17]] };
+        FlatShape { kind: s[0] as u8, stroke: s[2], cx: s[4], cy: s[5], mx: s[6], my: s[7], radius: s[8], rotation: s[9], ex: s[10], ey: s[11], affine: inverse.inverse() }
+    }
+
+    /// Boxes that surely hold what an outlined box paints: its four sides and its
+    /// four rounded corners, where `bounds` is the whole box. A frame round the
+    /// screen drawn as an outline has the screen for bounds, and a change in it
+    /// (its shadow, its edge light) only touches the band. `None` for any other
+    /// shape, or when the band is most of the box anyway.
+    pub fn outline_cover(&self) -> Option<[[f32; 4]; 8]> {
+        if self.kind != 1 || self.stroke <= 0.0 || self.rotation != 0.0 || self.mx < 0.5 || self.my < 0.5 {
+            return None;
+        }
+        // Painted within half the stroke of the outline: the straight sides lie on
+        // the box's edges, each corner's curve inside a square of its radius.
+        let h = self.stroke * 0.5;
+        let c = self.radius.clamp(0.0, self.mx.min(self.my)) + h;
+        let (x0, y0, x1, y1) = (self.cx - self.mx, self.cy - self.my, self.cx + self.mx, self.cy + self.my);
+        let local = [
+            [x0 - h, y0 - h, x1 + h, y0 + h],
+            [x0 - h, y1 - h, x1 + h, y1 + h],
+            [x0 - h, y0 - h, x0 + h, y1 + h],
+            [x1 - h, y0 - h, x1 + h, y1 + h],
+            [x0 - h, y0 - h, x0 + c, y0 + c],
+            [x1 - c, y0 - h, x1 + h, y0 + c],
+            [x0 - h, y1 - c, x0 + c, y1 + h],
+            [x1 - c, y1 - c, x1 + h, y1 + h],
+        ];
+        let area = |b: &[f32; 4]| (b[2] - b[0]).max(0.0) * (b[3] - b[1]).max(0.0);
+        if local.iter().map(area).sum::<f32>() > 0.6 * (x1 - x0 + 2.0 * h) * (y1 - y0 + 2.0 * h) {
+            return None;
+        }
+        Some(local.map(|b| self.affine.bounds(b)))
+    }
+
     pub fn encode(&self, blend: f32, s: &mut [f32]) {
         let (c2, c3) = if self.kind == 2 { (self.ex, 0.0) } else { (self.ex, self.ey) };
         s[..12].copy_from_slice(&[
@@ -400,5 +437,63 @@ impl FlatShape {
             self.radius, self.rotation, c2, c3,
         ]);
         self.affine.encode(&mut s[12..20]);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn frame(affine: Affine) -> FlatShape {
+        // A rounded outline as thick as a frame, its box the whole of a 1920 x 1080 screen.
+        FlatShape { kind: 1, cx: 960.0, cy: 540.0, mx: 940.0, my: 520.0, radius: 60.0, rotation: 0.0, ex: 1.0, ey: 1.0, stroke: 40.0, affine }
+    }
+
+    #[test]
+    fn an_outlined_box_is_covered_by_its_band() {
+        for affine in [Affine::IDENTITY, Affine::new((960.0, 540.0), 0.0, (0.5, 0.75), (13.0, -7.0))] {
+            let p = frame(affine);
+            let pieces = p.outline_cover().expect("a thin outline of a big box is a band");
+            let b = p.bounds().unwrap();
+            let area = |r: &[f32; 4]| (r[2] - r[0]) * (r[3] - r[1]);
+            assert!(pieces.iter().map(area).sum::<f32>() < 0.3 * area(&b));
+            // Every point it paints falls in one of the pieces.
+            let mut y = b[1];
+            while y <= b[3] {
+                let mut x = b[0];
+                while x <= b[2] {
+                    if p.distance(x, y) <= 0.0 {
+                        assert!(pieces.iter().any(|r| x >= r[0] - 0.01 && x <= r[2] + 0.01 && y >= r[1] - 0.01 && y <= r[3] + 0.01), "({x}, {y}) is painted and in no piece");
+                    }
+                    x += 3.0;
+                }
+                y += 3.0;
+            }
+        }
+    }
+
+    #[test]
+    fn a_filled_or_turned_box_has_no_band() {
+        let mut p = frame(Affine::IDENTITY);
+        p.stroke = 0.0;
+        assert!(p.outline_cover().is_none());
+        let mut p = frame(Affine::IDENTITY);
+        p.rotation = 0.2;
+        assert!(p.outline_cover().is_none());
+        // An outline so thick it is most of its box: the box itself.
+        let mut p = frame(Affine::IDENTITY);
+        p.stroke = 700.0;
+        assert!(p.outline_cover().is_none());
+    }
+
+    #[test]
+    fn decode_gives_back_what_encode_wrote() {
+        let p = frame(Affine::new((100.0, 50.0), 0.3, (2.0, 0.5), (4.0, 9.0)));
+        let mut s = [0.0; 20];
+        p.encode(0.0, &mut s);
+        let q = FlatShape::decode(&s);
+        for (x, y) in [(10.0, 20.0), (960.0, 540.0), (1500.0, 30.0)] {
+            assert!((p.distance(x, y) - q.distance(x, y)).abs() < 1e-2);
+        }
     }
 }
