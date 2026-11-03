@@ -154,6 +154,11 @@ pub struct Lens {
     sample: Vec<u8>,
     /// The last capture taken in has been taken in once more, identical: see `receive`.
     confirmed: bool,
+    /// What the scene itself painted again (surface pixels, logical) since the last capture taken in was
+    /// asked: there a capture differs from that one because of us, not because of what is behind (#125).
+    /// `ours_now` is since the last capture asked; `ours_asked`, up to the one on its way. `None`: not known.
+    ours_now: Option<Vec<[f32; 4]>>,
+    ours_asked: Option<Vec<[f32; 4]>>,
     /// The last capture that came was not the same as the one before it (or was: then the check lets it through).
     pub last_new: bool,
     last_same: bool,
@@ -201,6 +206,8 @@ impl Lens {
             frost: Frost::new(d, px, b),
             sample: Vec::new(),
             confirmed: false,
+            ours_now: Some(Vec::new()),
+            ours_asked: Some(Vec::new()),
             last_new: false,
             last_same: false,
             pending: None,
@@ -214,6 +221,17 @@ impl Lens {
             fixed_frost: false,
             frosted_with: [0.0; 8],
         }
+    }
+
+    /// The scene painted these pieces again (surface pixels, logical), or something it does not say where (`None`).
+    pub fn painted_ours(&mut self, pieces: Option<&[[f32; 4]]>) {
+        self.ours_now = join_ours(self.ours_now.take(), pieces);
+    }
+
+    /// A capture was asked for: it sees what was painted up to now.
+    pub fn asked(&mut self) {
+        let now = std::mem::replace(&mut self.ours_now, Some(Vec::new()));
+        self.ours_asked = join_ours(self.ours_asked.take(), now.as_deref());
     }
 
     /// Which of the two canvases this frame is painted on.
@@ -268,7 +286,29 @@ impl Lens {
         // looked at, which is enough to know whether something has moved.
         // A capture of parts looks at the parts only: the rest of the buffer holds nothing.
         let parts: Vec<[u32; 4]> = d.rects.iter().copied().filter(|r| r[2] > 0 && r[3] > 0 && r[0] + r[2] <= d.width && r[1] + r[3] <= d.height).collect();
+        // Where the scene painted again since the capture this one is compared with, in the capture's pixels
+        // (a little wider: what is painted spills a pixel or two past its box). The capture has us on top,
+        // so a glass that animates itself —a ripple, a spinner— made every capture look new while nothing
+        // behind had moved, and Live bend never rested (#125). Those bytes are not compared.
+        let ours: Vec<[i64; 4]> = match (&self.ours_asked, bounds == self.bounds) {
+            (Some(rects), true) => rects.iter().map(|b| {
+                let x0 = ((b[0] - bounds[0] as f32) * scale).floor() as i64 - 2;
+                let y0 = ((b[1] - bounds[1] as f32) * scale).floor() as i64 - 2;
+                let x1 = ((b[2] - bounds[0] as f32) * scale).ceil() as i64 + 2;
+                let y1 = ((b[3] - bounds[1] as f32) * scale).ceil() as i64 + 2;
+                [x0, y0, x1, y1]
+            }).filter(|r| r[2] > 0 && r[3] > 0 && r[0] < d.width as i64 && r[1] < d.height as i64).collect(),
+            _ => Vec::new(),
+        };
+        let theirs = |at: usize| {
+            let (x, y) = (((at % d.stride as usize) / 4) as i64, (at / d.stride as usize) as i64);
+            !ours.iter().any(|r| x >= r[0] && x < r[2] && y >= r[1] && y < r[3])
+        };
+        let mut behind: Vec<bool> = Vec::new();
         let sample: Vec<u8> = if parts.is_empty() {
+            if !ours.is_empty() {
+                behind = (0..data.len()).step_by(13).map(theirs).collect();
+            }
             data.iter().copied().step_by(13).collect()
         } else {
             let mut all = Vec::new();
@@ -277,6 +317,9 @@ impl Lens {
                     let from = (y * d.stride + r[0] * 4) as usize;
                     if let Some(row) = data.get(from..from + r[2] as usize * 4) {
                         all.extend(row.iter().copied().step_by(13));
+                        if !ours.is_empty() {
+                            behind.extend((from..from + row.len()).step_by(13).map(theirs));
+                        }
                     }
                 }
             }
@@ -289,7 +332,13 @@ impl Lens {
         // compositor's on top of the glass —another bar's piece hanging over it,
         // a notice—, which no capture will ever take away, and refusing them all
         // left the glass with its first background for ever, black (#113).
-        let same = bounds == self.bounds && sample.len() == self.sample.len() && sample.iter().zip(&self.sample).all(|(a, b)| a.abs_diff(*b) <= 3);
+        let alike = |a: &u8, b: &u8| a.abs_diff(*b) <= 3;
+        let strictly_same = bounds == self.bounds && sample.len() == self.sample.len() && sample.iter().zip(&self.sample).all(|(a, b)| alike(a, b));
+        // What is behind is the same: it differs only where we painted. Not when we painted most of it: then
+        // too little is left to tell, and a change behind a glass that animates whole has to be seen.
+        let left = behind.iter().filter(|b| **b).count();
+        let same = strictly_same
+            || (bounds == self.bounds && sample.len() == self.sample.len() && behind.len() == sample.len() && left * 2 > sample.len() && sample.iter().zip(&self.sample).zip(&behind).all(|((a, b), theirs)| !theirs || alike(a, b)));
         let no = said(|c| {
             c.arrived += 1;
             c.n += 1;
@@ -321,6 +370,8 @@ impl Lens {
         self.last_same = same;
         self.sample = sample;
         self.bounds = bounds;
+        // The one compared with from now on is this one: what we paint counts from it.
+        self.ours_asked = Some(Vec::new());
         let dev = &g.device;
         let size = (d.width, d.height);
         if self.capture.as_ref().is_none_or(|f| f.2 != size) {
@@ -370,7 +421,8 @@ impl Lens {
         if scissors.is_empty() {
             return false;
         }
-        g.queue.write_buffer(&self.bounds_uniforms, 0, bytemuck::cast_slice(&[bounds[0] as f32 * scale, bounds[1] as f32 * scale, bounds[2] as f32 * scale, bounds[3] as f32 * scale, d.opacity, if same { 1.0 } else { 0.0 }, 0.0, 0.0]));
+        // The check lets through only one identical to the one before (#113), not one that differs where we painted.
+        g.queue.write_buffer(&self.bounds_uniforms, 0, bytemuck::cast_slice(&[bounds[0] as f32 * scale, bounds[1] as f32 * scale, bounds[2] as f32 * scale, bounds[3] as f32 * scale, d.opacity, if strictly_same { 1.0 } else { 0.0 }, 0.0, 0.0]));
         // The passes go in the same submission as the frame being painted now
         // —it has to be painted again—: a separate one cost one more `submit`,
         // a third of a millisecond per capture.
@@ -1239,4 +1291,16 @@ mod tests {
         assert_eq!(capture_interval(Some(0.0)), Duration::from_secs_f32(INTERVAL_RANGE.0));
         assert_eq!(capture_interval(Some(1e6)), Duration::from_secs_f32(INTERVAL_RANGE.1));
     }
+}
+
+/// What the scene painted, added to what it had: a few boxes, or the box round them all once there are many
+/// (a ripple that goes round the glass ends up as all of it, and then the capture is compared whole).
+fn join_ours(had: Option<Vec<[f32; 4]>>, pieces: Option<&[[f32; 4]]>) -> Option<Vec<[f32; 4]>> {
+    let (mut had, pieces) = (had?, pieces?);
+    had.extend(pieces.iter().filter(|b| b[2] > b[0] && b[3] > b[1]));
+    if had.len() > 16 {
+        let u = had.iter().fold([f32::MAX, f32::MAX, f32::MIN, f32::MIN], |u, b| [u[0].min(b[0]), u[1].min(b[1]), u[2].max(b[2]), u[3].max(b[3])]);
+        had = vec![u];
+    }
+    Some(had)
 }

@@ -5171,6 +5171,9 @@ impl Sheet {
             frames.settle();
         }
         if self.window.capture_backdrop(bounds, &self.glass_rects, on_change) {
+            if let Some(lens) = &mut self.lens {
+                lens.asked();
+            }
             crate::lens::log_asked(on_change);
             self.asked_box = bounds;
             self.capture_forced = false;

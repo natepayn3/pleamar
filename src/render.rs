@@ -5088,6 +5088,13 @@ pub fn run(
             let was_painted = g.paint(l, &draw, &uniforms, asks || others || fifo, (knows_where && l.painted == Some(where_) && !nudge).then(|| with_owed.as_deref().unwrap_or(&changed[..])));
             if was_painted {
                 l.rate_last = Some(Instant::now());
+                // What the scene painted itself (not what a capture taken in owed): where the next capture may
+                // differ from the last one because of us (#125). In the surface's pixels; not known, all of it.
+                let o = l.view.origin;
+                let ours: Option<Vec<[f32; 4]>> = (knows_where && !all_changed).then(|| changed.iter().map(|b| [b[0] - o.0, b[1] - o.1, b[2] - o.0, b[3] - o.1]).collect());
+                if let Some(lens) = &mut l.lens {
+                    lens.painted_ours(ours.as_deref());
+                }
             }
             if was_painted && ((others && answers.contains(&l.id)) || (fifo && l.open)) {
                 in_flight.retain(|f| f.0 != l.id);
