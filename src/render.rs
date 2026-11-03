@@ -4785,6 +4785,9 @@ pub fn run(
         // sets it, but only when its queue is full: on waking up it
         // accepted two or three frames without waiting and the loop presented them in two
         // milliseconds; there, never more than one frame per period.
+        // How long this round waits on purpose —its turn, the monitor, the compositor's notice, the
+        // scene's own `rate:`—, so that a frame is only called slow for what it took itself.
+        let wait_from = Instant::now();
         if !op.no_vsync && !op.naive {
             let right_now = Instant::now();
             if g.uses_mailbox() {
@@ -4903,6 +4906,7 @@ pub fn run(
                 }
             }
         }
+        let waited_ms = wait_from.elapsed().as_secs_f32() * 1000.0;
         if profiling {
             let n = Instant::now();
             sec_wait = (n - prof_t).as_secs_f64() * 1000.0;
@@ -5477,7 +5481,10 @@ pub fn run(
         }
         let ms = dt * 1000.0;
         // A permanent telltale: any frame that goes over two periods, with its time.
-        if ms > period_ms * 2.4 && !first_frame && cycle.dts.len() > 1 && !op.no_vsync && !op.naive {
+        // Not a frame that waited out a slower pace on purpose (a scene's `rate: 12` at rest, the one
+        // paint a second of a surface the compositor is not showing): those filled the log with a
+        // "slow frame" for every frame, tens of thousands of lines an hour, and hid the real ones.
+        if ms - waited_ms > period_ms * 2.4 && !first_frame && cycle.dts.len() > 1 && !op.no_vsync && !op.naive {
             if profiling {
                 println!(
                     "render · slow frame: {ms:.0} ms at {t_total:.2} s · input {:.1} · rules {:.1} · windows' frames {:.1} · compose {:.1} · regions {:.1} · waiting its turn {sec_wait:.1} · paint {:.1} · rest {:.1} ms",
