@@ -2405,6 +2405,19 @@ impl SeatHandler for State {
     }
     fn new_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat) {}
     fn new_capability(&mut self, _: &Connection, qh: &QueueHandle<Self>, seat: wl_seat::WlSeat, c: Capability) {
+        // An agent's hands under pleamar-wm (`agent on`): seats named
+        // `cua-agent…`. Yours is the other one, whatever order they were
+        // announced in: GTK 3 wants yours last, and taking the first one for
+        // the keyboard left these windows listening to the agent's.
+        let agents = self.seats.info(&seat).and_then(|i| i.name).is_some_and(|n| n.starts_with("cua-agent"));
+        if agents {
+            if c == Capability::Pointer {
+                if let Ok(p) = self.seats.get_pointer(qh, &seat) {
+                    self.pointer_seats.push((p, seat.clone()));
+                }
+            }
+            return;
+        }
         if let Some(pp) = POPUPS.get() {
             pp.seat.lock().unwrap().get_or_insert_with(|| seat.clone());
         }
