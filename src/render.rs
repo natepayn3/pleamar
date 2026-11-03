@@ -4582,6 +4582,9 @@ pub fn run(
             region = boxes;
             region_yielding = yielding;
         }
+        // The captures on the card of sheets that have gone go with them.
+        #[cfg(target_os = "linux")]
+        crate::platform::keep_card_backdrops(&sheets.iter().map(|l| l.id).collect::<Vec<_>>());
         // And behind the glass, what the compositor blurs: the strips that
         // fall on each surface's piece, in its coordinates. Only when they change.
         for l in sheets.iter_mut() {
@@ -5690,7 +5693,7 @@ fn make_card_backdrop(g: &Gpu, sheet: u32, fourcc: u32, size: (u32, u32)) {
     match crate::dmabuf::export_to_capture(&g.device, size, &layouts) {
         Ok(e) => {
             eprintln!("render · captures of a glass go straight onto the card ({}×{}), the processor never reads them", size.0, size.1);
-            let card = std::sync::Arc::new(CardBackdrop { texture: e.texture, fd: e.fd, modifier: e.modifier, planes: e.planes, fourcc, size });
+            let card = std::sync::Arc::new(CardBackdrop { texture: e.texture, fd: e.fd, modifier: e.modifier, planes: e.planes, fourcc, size, buffer: std::sync::Mutex::new(None) });
             CARD_BACKDROPS.lock().unwrap().get_or_insert_with(Default::default).insert(sheet, card);
         }
         Err(why) => refuse(why),

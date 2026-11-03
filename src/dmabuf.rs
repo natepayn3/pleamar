@@ -761,6 +761,18 @@ unsafe fn export_image(hal: &wgpu::hal::vulkan::Device, extent: wgpu::Extent3d, 
         Ok(fd) => unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) },
         Err(e) => return fail(Some(memory), format!("the frame could not be shared: {e}")),
     };
+    // Not for the programs we start. NVIDIA's driver hands the fd over without close-on-exec (Mesa's sets
+    // it), and nothing closes it on the way to a `run`, a `spawn` or a scene a keeper starts again: every
+    // child kept every frame and capture of ours alive on the card, long after we had let go of them
+    // (a crash loop of the bar filled 10 GB of an RTX 3080 that way).
+    // SAFETY: an fd of ours, just made; F_SETFD only changes its close-on-exec flag.
+    unsafe {
+        let raw = std::os::fd::AsRawFd::as_raw_fd(&fd);
+        let flags = libc::fcntl(raw, libc::F_GETFD);
+        if flags >= 0 {
+            libc::fcntl(raw, libc::F_SETFD, flags | libc::FD_CLOEXEC);
+        }
+    }
     // SAFETY: an image with a modifier of one plane.
     let layout = unsafe { raw.get_image_subresource_layout(image, vk::ImageSubresource { aspect_mask: vk::ImageAspectFlags::MEMORY_PLANE_0_EXT, mip_level: 0, array_layer: 0 }) };
     Ok((image, memory, fd, chosen.drm_format_modifier, vec![(layout.offset as u32, layout.row_pitch as u32)]))

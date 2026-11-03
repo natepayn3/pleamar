@@ -582,23 +582,25 @@ impl Dispatch2<ZwlrScreencopyFrameV1, State> for CaptureFor {
                     && card.fourcc == offer.0
                     && card.size == (offer.1, offer.2)
                 {
-                    if e.card_buffers.get(&id).is_none_or(|(c, _)| !Arc::ptr_eq(c, &card)) {
-                        let params = d.global.create_params(&d.qh, Silent);
-                        for (k, (offset, stride)) in card.planes.iter().enumerate() {
-                            params.add(std::os::fd::AsFd::as_fd(&card.fd), k as u32, *offset, *stride, (card.modifier >> 32) as u32, card.modifier as u32);
-                        }
-                        let buffer = params.create_immed(offer.1 as i32, offer.2 as i32, offer.0, zwp_linux_buffer_params_v1::Flags::empty(), &d.qh, Silent);
-                        params.destroy();
-                        if let Some((_, old)) = e.card_buffers.insert(id, (card.clone(), buffer)) {
-                            old.destroy();
-                        }
-                    }
+                    let buffer = card
+                        .buffer
+                        .lock()
+                        .unwrap()
+                        .get_or_insert_with(|| {
+                            let params = d.global.create_params(&d.qh, Silent);
+                            for (k, (offset, stride)) in card.planes.iter().enumerate() {
+                                params.add(std::os::fd::AsFd::as_fd(&card.fd), k as u32, *offset, *stride, (card.modifier >> 32) as u32, card.modifier as u32);
+                            }
+                            let buffer = params.create_immed(offer.1 as i32, offer.2 as i32, offer.0, zwp_linux_buffer_params_v1::Flags::empty(), &d.qh, Silent);
+                            params.destroy();
+                            buffer
+                        })
+                        .clone();
                     *self.on_card.lock().unwrap() = Some(card);
-                    let buffer = &e.card_buffers[&id].1;
                     if self.on_change {
-                        frame.copy_with_damage(buffer);
+                        frame.copy_with_damage(&buffer);
                     } else {
-                        frame.copy(buffer);
+                        frame.copy(&buffer);
                     }
                     return;
                 }
@@ -1020,8 +1022,6 @@ struct State {
     /// The memory for the captures of what's behind, one per surface.
     /// (and one for each part, when a capture is made of several).
     capture_buffers: std::collections::HashMap<(u32, usize), CaptureBuffer>,
-    /// The buffers on the card the compositor copies captures into, by sheet.
-    card_buffers: std::collections::HashMap<u32, (Arc<super::CardBackdrop>, WlBuffer)>,
     /// What the parts are copied into, one per surface.
     capture_hulls: std::collections::HashMap<u32, Assembled>,
 }
@@ -1869,7 +1869,6 @@ pub fn run_event_loop(wanted: Vec<Surface>, extra_height: u32, instance: wgpu::I
         connection: connection.clone(),
         qh: qh.clone(),
         capture_buffers: std::collections::HashMap::new(),
-        card_buffers: std::collections::HashMap::new(),
         capture_hulls: std::collections::HashMap::new(),
         instance,
         wanted,

@@ -1156,10 +1156,34 @@ pub struct CardBackdrop {
     pub planes: Vec<(u32, u32)>,
     pub fourcc: u32,
     pub size: (u32, u32),
+    /// The compositor's handle to it, made by the platform thread the first time a capture goes in:
+    /// it goes with the texture, when the last one holding this lets go.
+    #[cfg(target_os = "linux")]
+    pub buffer: std::sync::Mutex<Option<wayland_client::protocol::wl_buffer::WlBuffer>>,
+}
+
+impl Drop for CardBackdrop {
+    fn drop(&mut self) {
+        #[cfg(target_os = "linux")]
+        if let Some(b) = self.buffer.get_mut().unwrap_or_else(|p| p.into_inner()).take() {
+            b.destroy();
+        }
+    }
 }
 
 /// Each sheet's, by its id: made by the render when the compositor offers, taken by the platform thread.
 pub static CARD_BACKDROPS: std::sync::Mutex<Option<std::collections::HashMap<u32, std::sync::Arc<CardBackdrop>>>> = std::sync::Mutex::new(None);
+
+/// Only the sheets still there keep theirs: one that went (its monitor asleep, its surface closed, a
+/// popup) left its buffer on the card, and the compositor its copy of it, for as long as the scene ran.
+pub fn keep_card_backdrops(live: &[u32]) {
+    let mut m = CARD_BACKDROPS.lock().unwrap();
+    if let Some(m) = m.as_mut()
+        && m.keys().any(|id| !live.contains(id))
+    {
+        m.retain(|id, _| live.contains(id));
+    }
+}
 /// The sheets whose compositor did not take the card (a copy failed), and when: shared memory for half a minute.
 pub static CARD_REFUSED: std::sync::Mutex<Vec<(u32, std::time::Instant)>> = std::sync::Mutex::new(Vec::new());
 
