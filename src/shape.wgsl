@@ -318,6 +318,18 @@ fn between_stops(first: u32, n: u32, t: f32) -> vec3<f32> {
     return prev.rgb;
 }
 
+/// A tile of a body's table (see `fs`): where its list of shapes starts in
+/// `points` and how many it has. Outside the table, none.
+fn tile_entry(t: u32, at: vec2<f32>) -> vec2<u32> {
+    let size = points[t + 2u];
+    let cell = floor((at - vec2<f32>(points[t], points[t + 1u])) / size);
+    let cols = points[t + 3u];
+    let rows = points[t + 4u];
+    if (cell.x < 0.0 || cell.y < 0.0 || cell.x >= cols || cell.y >= rows) { return vec2<u32>(0u, 0u); }
+    let slot = t + 5u + u32(cell.y * cols + cell.x) * 2u;
+    return vec2<u32>(u32(points[slot]), u32(points[slot + 1u]));
+}
+
 fn smooth_min(a: f32, b: f32, k: f32) -> f32 {
     if (k < 0.5 || a > FAR * 0.5 || b > FAR * 0.5) { return min(a, b); }
     let h = max(k - abs(a - b), 0.0) / k;
@@ -428,6 +440,25 @@ fn fs(e: VertexOut) -> @location(0) vec4<f32> {
     let kind = u32(el.header.x);
     if (kind == HUD) { return instruments(p); }
 
+    // A big body is cut into tiles (`tile_bodies`, gpu.rs), each with the
+    // shapes that can reach it: a pixel measures only those, and where none
+    // does it is not painted. That is decided for the whole 2×2 quad the pixel
+    // is in, so the edges' derivatives always have their four pixels.
+    var tile = vec2<u32>(0u, 0u);
+    var tiled = false;
+    if (kind == 0u) {
+        let table = shapes[u32(el.header.y)].a.w;
+        if (table > 0.5) {
+            let t = u32(table) - 1u;
+            let q0 = (floor(e.pos.xy * 0.5) * 2.0 + 0.5) / u.header.w + u.hud.xw;
+            let q1 = q0 + vec2<f32>(1.0 / u.header.w);
+            let quad = tile_entry(t, q0).y + tile_entry(t, vec2<f32>(q1.x, q0.y)).y + tile_entry(t, vec2<f32>(q0.x, q1.y)).y + tile_entry(t, q1).y;
+            if (quad == 0u) { discard; }
+            tile = tile_entry(t, p);
+            tiled = true;
+        }
+    }
+
     var clip = 1.0;
     for (var k = 0; k < 4; k++) {
         let r = el.clips[k];
@@ -504,9 +535,11 @@ fn fs(e: VertexOut) -> @location(0) vec4<f32> {
     var dome_deepest = FAR;
     var dome_sum = vec2<f32>(0.0);
     var dome_weight = 0.0;
-    for (var k = 0u; k < n; k++) {
-        let blend = shapes[first + k].a.y;
-        let dk = shape_distance(first + k, p);
+    let count = select(n, tile.y, tiled);
+    for (var j = 0u; j < count; j++) {
+        let k = first + select(j, u32(points[tile.x + j]), tiled);
+        let blend = shapes[k].a.y;
+        let dk = shape_distance(k, p);
         if (want_dome) {
             if (dk < dome_deepest) {
                 let rescale = exp(-min(dome_deepest - dk, 600.0) / DOME_HANDOVER);
@@ -516,12 +549,12 @@ fn fs(e: VertexOut) -> @location(0) vec4<f32> {
             }
             if (dk < dome_deepest + 8.0 * DOME_HANDOVER) {
                 let w = exp(-(dk - dome_deepest) / DOME_HANDOVER);
-                dome_sum += dome_offset(first + k, p, dome_amount) * w;
+                dome_sum += dome_offset(k, p, dome_amount) * w;
                 dome_weight += w;
             }
         }
         d = smooth_min(d, dk, blend);
-        if (has_shadow) { d_shadow = smooth_min(d_shadow, shape_distance(first + k, p - el.shadow.xy), blend); }
+        if (has_shadow) { d_shadow = smooth_min(d_shadow, shape_distance(k, p - el.shadow.xy), blend); }
     }
     // Glass: from 0 to 1, in the `uv` slot, which a body does not use.
     let glass = el.uv.x;
