@@ -4856,7 +4856,11 @@ pub fn run(
                 if let Some(id) = frame_requested {
                     let patience = if missed_notices >= 3 { Duration::from_secs(1) } else { (period * 3).max(Duration::from_millis(50)) };
                     let (unseen_pace, notice_from) = (missed_notices >= 3, Instant::now());
-                    let limit = notice_from + patience;
+                    // Not shown, the second counts from when that frame was handed over, not from now:
+                    // after a rest (a minute with nothing to paint) a notice of it that has not come
+                    // will not, and the first frame of whatever woke it —a key bound to `--say … emit`,
+                    // a click— waited the whole second for it before painting anything.
+                    let limit = if unseen_pace { last_presented + patience } else { notice_from + patience };
                     while !frame_ready {
                         let left = limit.saturating_duration_since(Instant::now());
                         if left.is_zero() {
