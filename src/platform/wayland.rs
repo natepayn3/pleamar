@@ -366,6 +366,11 @@ struct BackdropTarget {
     /// Where it is on its monitor, and its size, in logical pixels.
     position: Mutex<Option<(i32, i32)>>,
     size: Mutex<(u32, u32)>,
+    /// A layer: the edges it is stuck to and its margins now, and how big its monitor is. The scene can move it
+    /// to another edge while running (`anchor: fact`); worked out from the edge it was born with, a sheet that
+    /// went from the top to the bottom photographed what was where it used to be, and bent that.
+    placement: Mutex<Option<(Anchor, [i32; 4])>>,
+    monitor: Mutex<Option<(i32, i32)>>,
     kind: BackdropKind,
     /// When the compositor was last asked where it is.
     last_asked: Mutex<Option<std::time::Instant>>,
@@ -393,7 +398,25 @@ enum BackdropKind {
 
 impl BackdropTarget {
     fn new(id: u32, output: Option<(wl_output::WlOutput, String)>, kind: BackdropKind) -> Arc<BackdropTarget> {
-        Arc::new(BackdropTarget { id, output: Mutex::new(output), position: Mutex::new(None), size: Mutex::new((0, 0)), kind, last_asked: Mutex::new(None), opacity: Mutex::new(1.0), in_flight: std::sync::atomic::AtomicBool::new(false), frames: Mutex::new(Vec::new()), sent: Mutex::new(Some(std::time::Instant::now())), asked: std::sync::atomic::AtomicU64::new(0) })
+        Arc::new(BackdropTarget { id, output: Mutex::new(output), position: Mutex::new(None), size: Mutex::new((0, 0)), placement: Mutex::new(None), monitor: Mutex::new(None), kind, last_asked: Mutex::new(None), opacity: Mutex::new(1.0), in_flight: std::sync::atomic::AtomicBool::new(false), frames: Mutex::new(Vec::new()), sent: Mutex::new(Some(std::time::Instant::now())), asked: std::sync::atomic::AtomicU64::new(0) })
+    }
+
+    /// A layer stuck to these edges with these margins (born so, or moved): where it is follows.
+    fn place(&self, anchor: Anchor, margin: [i32; 4]) {
+        *self.placement.lock().unwrap() = Some((anchor, margin));
+        self.locate();
+    }
+
+    /// Where a layer is, by the layer-shell rules, from its edges, its size and its monitor's.
+    fn locate(&self) {
+        let (Some((anchor, margin)), Some(monitor)) = (*self.placement.lock().unwrap(), *self.monitor.lock().unwrap()) else { return };
+        let size = *self.size.lock().unwrap();
+        if size.0 == 0 || size.1 == 0 {
+            return;
+        }
+        *self.position.lock().unwrap() = Some(position_on_output(anchor, margin, size, monitor));
+        // And let the next capture ask the compositor whether it's true.
+        *self.last_asked.lock().unwrap() = None;
     }
 
     /// On which monitor and where, now. With Hyprland it gets asked, at most
@@ -1038,7 +1061,6 @@ struct Placed {
     size: (u32, u32),
     /// A layer: which edges it's stuck to and with what margins, to know
     /// where it lands on its monitor; and what's needed to see what's behind.
-    layer_placement: Option<(Anchor, [i32; 4])>,
     backdrop: Option<Arc<BackdropTarget>>,
 }
 
@@ -1190,7 +1212,7 @@ impl State {
                 let surface = self.wgpu_surface_for(role.wl());
                 let output_name = self.outputs.info(output).and_then(|i| i.name).unwrap_or_default();
                 let backdrop = Some(BackdropTarget::new(id, Some((output.clone(), output_name)), BackdropKind::Window));
-                self.placed.push(Placed { id, which, role, output: output.clone(), viewport, _fractional_scale: fractional_scale, scale: 1.0, size: (0, 0), pending: Some((surface, name.clone(), mhz)), layer_placement: None, backdrop });
+                self.placed.push(Placed { id, which, role, output: output.clone(), viewport, _fractional_scale: fractional_scale, scale: 1.0, size: (0, 0), pending: Some((surface, name.clone(), mhz)), backdrop });
                 continue;
             }
             let layer = self.layers.create_layer_surface(qh, wl, level, Some("pleamar"), Some(output));
@@ -1203,17 +1225,20 @@ impl State {
             let m = p.margin;
             let margin = [m[0] + k as i32 * (height as i32 + 12), m[1], m[2], m[3]];
             layer.set_margin(margin[0], margin[1], margin[2], margin[3]);
+            let id = next_surface_id();
+            let output_name = self.outputs.info(output).and_then(|i| i.name).unwrap_or_default();
+            let backdrop = BackdropTarget::new(id, Some((output.clone(), output_name)), BackdropKind::Layer);
+            backdrop.place(edges, margin);
             // Noted down, in case the scene moves it to another edge while running,
             // or a reload gives it another size, edge, margin, room or level.
             if let Some(c) = MOVABLE_LAYERS.get() {
-                c.placed.lock().unwrap().push((which, layer.clone(), margin, stretch));
+                c.placed.lock().unwrap().push((which, layer.clone(), margin, stretch, backdrop.clone()));
             }
             layer.set_size(size.0, size.1);
             // With a condition, none until the render says it holds (or what it last said, for a copy placed later).
             layer.set_exclusive_zone(if p.reserve_while.is_some() { said.zone.unwrap_or(0) } else { p.exclusive_zone });
             // If the keyboard depends on something (`exclusive while open`), it's born without it.
             layer.set_keyboard_interactivity(keyboard_interactivity(if p.keyboard_while { Keyboard::Never } else { p.keyboard }));
-            let id = next_surface_id();
             // With a viewport, the logical size is fixed and the real pixels are
             // decided by the scale: that way a scale that isn't whole also works.
             // Width 0 is "the whole monitor": how much that is, the compositor will say when configuring it.
@@ -1221,10 +1246,8 @@ impl State {
             let fractional_scale = self.fractional_scales.as_ref().map(|m| m.get_fractional_scale(layer.wl_surface(), qh, ScaleFor(id)));
             layer.commit();
             let surface = self.wgpu_surface_for(layer.wl_surface());
-            let output_name = self.outputs.info(output).and_then(|i| i.name).unwrap_or_default();
-            let backdrop = Some(BackdropTarget::new(id, Some((output.clone(), output_name)), BackdropKind::Layer));
-            let layer_placement = Some((edges, margin));
-            self.placed.push(Placed { id, which, role: Role::Layer(layer), output: output.clone(), viewport, _fractional_scale: fractional_scale, scale: 1.0, size: (0, 0), pending: Some((surface, name.clone(), mhz)), layer_placement, backdrop });
+            let backdrop = Some(backdrop);
+            self.placed.push(Placed { id, which, role: Role::Layer(layer), output: output.clone(), viewport, _fractional_scale: fractional_scale, scale: 1.0, size: (0, 0), pending: Some((surface, name.clone(), mhz)), backdrop });
             LAYERS_PLACED.fetch_add(1, Ordering::Relaxed);
             }
         }
@@ -1246,7 +1269,7 @@ impl State {
         for p in self.placed.iter().filter(|p| moved(p, wanted)) {
             let _ = self.to_render.send(ToRender::SheetGone(p.id));
             if let Some(c) = MOVABLE_LAYERS.get() {
-                c.placed.lock().unwrap().retain(|(_, layer, _, _)| layer.wl_surface() != p.role.wl());
+                c.placed.lock().unwrap().retain(|(_, layer, _, _, _)| layer.wl_surface() != p.role.wl());
             }
         }
         self.placed.retain(|p| !moved(p, wanted));
@@ -1272,7 +1295,7 @@ impl State {
         for p in self.placed.iter().filter(|p| &p.output == output) {
             let _ = self.to_render.send(ToRender::SheetGone(p.id));
             if let Some(c) = MOVABLE_LAYERS.get() {
-                c.placed.lock().unwrap().retain(|(_, layer, _, _)| layer.wl_surface() != p.role.wl());
+                c.placed.lock().unwrap().retain(|(_, layer, _, _, _)| layer.wl_surface() != p.role.wl());
             }
         }
         self.placed.retain(|p| &p.output != output);
@@ -1624,7 +1647,7 @@ fn placement(anchor: SurfaceAnchor, s: Stretch, asked: (u32, u32)) -> (Anchor, (
 /// Marea unable to choose a corner while recording.
 struct MovableLayers {
     connection: Connection,
-    placed: Mutex<Vec<(usize, LayerSurface, [i32; 4], Stretch)>>,
+    placed: Mutex<Vec<(usize, LayerSurface, [i32; 4], Stretch, Arc<BackdropTarget>)>>,
     /// What the render last said of each surface while running —its room, its edge, its level—: a copy placed
     /// afterwards (a monitor that comes, or one whose number changed) is born with it. The render says each only
     /// when it changes, so a copy placed after it was said kept the scene's first values: a bar keeping no room
@@ -1664,7 +1687,7 @@ pub fn relayer(which: usize, level: Level) {
     let Some(c) = MOVABLE_LAYERS.get() else { return };
     c.said.lock().unwrap().entry(which).or_default().level = Some(level);
     let mut any = false;
-    for (k, layer, _, _) in c.placed.lock().unwrap().iter() {
+    for (k, layer, _, _, _) in c.placed.lock().unwrap().iter() {
         if *k == which {
             layer.set_layer(layer_of(level));
             layer.commit();
@@ -1680,7 +1703,7 @@ pub fn rezone(which: usize, zone: i32) {
     let Some(c) = MOVABLE_LAYERS.get() else { return };
     c.said.lock().unwrap().entry(which).or_default().zone = Some(zone);
     let mut any = false;
-    for (k, layer, _, _) in c.placed.lock().unwrap().iter() {
+    for (k, layer, _, _, _) in c.placed.lock().unwrap().iter() {
         if *k == which {
             layer.set_exclusive_zone(zone);
             layer.commit();
@@ -1696,13 +1719,14 @@ pub fn reanchor(which: usize, anchor: SurfaceAnchor) {
     let Some(c) = MOVABLE_LAYERS.get() else { return };
     c.said.lock().unwrap().entry(which).or_default().anchor = Some(anchor);
     let mut any = false;
-    for (k, layer, margin, stretch) in c.placed.lock().unwrap().iter_mut() {
+    for (k, layer, margin, stretch, backdrop) in c.placed.lock().unwrap().iter_mut() {
         if *k != which {
             continue;
         }
         let (edges, size) = placement(anchor, *stretch, (0, 0));
         stretch.edges = edges;
         layer.set_anchor(edges);
+        backdrop.place(edges, *margin);
         // As big as the monitor: from one edge to another, the size along the fourth changes too.
         if stretch.width && stretch.height {
             layer.set_size(size.0, size.1);
@@ -1728,7 +1752,7 @@ pub fn reshape(which: usize, p: &crate::scene::Surface) {
         said.level = None;
     }
     let mut any = false;
-    for (k, layer, margin, stretch) in c.placed.lock().unwrap().iter_mut() {
+    for (k, layer, margin, stretch, backdrop) in c.placed.lock().unwrap().iter_mut() {
         if *k != which {
             continue;
         }
@@ -1741,6 +1765,7 @@ pub fn reshape(which: usize, p: &crate::scene::Surface) {
         layer.set_anchor(edges);
         *margin = p.margin;
         layer.set_margin(margin[0], margin[1], margin[2], margin[3]);
+        backdrop.place(edges, *margin);
         layer.set_size(size.0, size.1);
         // With a condition, the render sets its room as it holds.
         if p.reserve_while.is_none() {
@@ -2011,7 +2036,7 @@ impl State {
         }
         self.placed.retain(|p| p.role.wl() != wl);
         if let Some(c) = MOVABLE_LAYERS.get() {
-            c.placed.lock().unwrap().retain(|(_, layer, _, _)| layer.wl_surface() != wl);
+            c.placed.lock().unwrap().retain(|(_, layer, _, _, _)| layer.wl_surface() != wl);
         }
     }
 
@@ -2032,11 +2057,10 @@ impl State {
             *d.size.lock().unwrap() = size;
             *d.last_asked.lock().unwrap() = None;
         }
-        if let (Some((anchor, margin)), Some(d)) = (p.layer_placement, &p.backdrop) {
+        if let (Role::Layer(_), Some(d)) = (&p.role, &p.backdrop) {
             if let Some((w, h)) = self.outputs.info(&p.output).and_then(|i| i.logical_size) {
-                *d.position.lock().unwrap() = Some(position_on_output(anchor, margin, size, (w, h)));
-                // And let the next capture ask the compositor whether it's true.
-                *d.last_asked.lock().unwrap() = None;
+                *d.monitor.lock().unwrap() = Some((w, h));
+                d.locate();
             }
         }
         // It had already been handed over and has changed size: someone stretched the window.
@@ -2565,7 +2589,7 @@ impl OutputHandler for State {
         let Some((w, h)) = self.outputs.info(&output).and_then(|i| i.logical_size) else { return };
         let Some(c) = MOVABLE_LAYERS.get() else { return };
         let mut any = false;
-        for (_, layer, _, stretch) in c.placed.lock().unwrap().iter_mut() {
+        for (_, layer, _, stretch, _) in c.placed.lock().unwrap().iter_mut() {
             if !(stretch.width && stretch.height) || stretch.monitor.is_none() || stretch.monitor == Some((w, h)) {
                 continue;
             }
