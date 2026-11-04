@@ -42,7 +42,7 @@ struct Element {
     t0: vec4<f32>,        // from screen to local, as in the shapes
     t1: vec4<f32>,
     glass2: vec4<f32>,    // glass: towards its light (x, y), whether it has one, dome
-    glass3: vec4<f32>,    // glass: dispersion, ripple, centre (x, y)
+    glass3: vec4<f32>,    // glass: dispersion, ripple, -, -
     glass4: vec4<f32>,    // glass: tint, saturation, mirror, highlight
 };
 
@@ -96,6 +96,10 @@ const LENS_THICKNESS: f32 = 1.4;
 // Its refractive index (crown glass), and how much of what is around the rim
 // mirrors (Schlick's F0, ((n − 1) / (n + 1))²).
 const LENS_IOR: f32 = 1.5;
+// How far `dome: 100%` pulls the middle in: what is there is seen
+// 1 / (1 − 0.5) = 2 times as big. It folds over only past 200 % (and below
+// −250 %); the compiler keeps it within ±100 %.
+const DOME_STRENGTH: f32 = 0.5;
 const LENS_F0: f32 = 0.04;
 
 // The height of the bevel across it, t from 0 at the edge to 1 where the flat
@@ -174,6 +178,64 @@ fn crease_free_depth(p: vec2<f32>, half: vec2<f32>, radius: f32) -> f32 {
         if (a.x + 2.0 * dc >= 0.0 && a.y + 2.0 * dc >= 0.0) { d = dc; }
     }
     return d;
+}
+
+// `dome:` the lens of one shape, as how far to look from `point` (in the
+// scene). Its middle is a rounded cap whose height falls to nothing at the
+// edge, (1 − ρ²)², ρ measured from the middle to the edge: what is behind is
+// seen bigger in the middle and a little smaller near the rim, and nothing
+// moves at the edge itself, where the bevel bends its own way. It reaches as
+// far as the shape's short side: a card is a round dome, a long bar a glass
+// rod —bigger across it, the same along it— ending in half a dome at each end,
+// and a little pill bends as much as a big panel. A box or an ellipse, filled;
+// anything else has no dome.
+fn dome_offset(k: u32, point: vec2<f32>, amount: f32) -> vec2<f32> {
+    let f = shapes[k];
+    let kind = u32(f.a.x);
+    if (f.a.z > 0.0 || (kind != RECT && kind != ELLIPSE)) { return vec2<f32>(0.0); }
+    let p = rotate_point(to_local(point, f.t0, f.t1), f.b.xy, f.c.y) - f.b.xy;
+    if (kind == ELLIPSE) {
+        // An ellipse stretches its cap with it.
+        let e = f.c.zw * f.c.x;
+        if (e.x < 0.5 || e.y < 0.5) { return vec2<f32>(0.0); }
+        let q = p / e;
+        let fall = 1.0 - min(dot(q, q), 1.0);
+        return dome_to_scene(f, -q * e * fall * fall * amount);
+    }
+    if (f.b.z < 0.5 || f.b.w < 0.5) { return vec2<f32>(0.0); }
+    let reach = min(f.b.z, f.b.w);
+    // The long side's straight stretch is the rod: across it, a square's dome
+    // pulled out.
+    let core = f.b.zw - vec2<f32>(reach);
+    let q = sign(p) * max(abs(p) - core, vec2<f32>(0.0)) / reach;
+    let fall = 1.0 - min(dot(q, q), 1.0);
+    return dome_to_scene(f, -q * reach * fall * fall * amount);
+}
+
+// From a shape's own axes back to the scene: undoing its rotation, then what
+// it inherits from its groups.
+fn dome_to_scene(f: Shape, v: vec2<f32>) -> vec2<f32> {
+    let r = rotate_point(v, vec2<f32>(0.0), -f.c.y);
+    let det = f.t0.x * f.t0.w - f.t0.y * f.t0.z;
+    if (abs(det) < 1e-8) { return vec2<f32>(0.0); }
+    return vec2<f32>(f.t0.w * r.x - f.t0.y * r.y, -f.t0.z * r.x + f.t0.x * r.y) / det;
+}
+
+// A body's dome: each of its shapes' own, the nearest weighing most, so where
+// two meet one lens gives way to the other with no tear.
+fn body_dome(first: u32, n: u32, point: vec2<f32>, amount: f32) -> vec2<f32> {
+    var nearest = FAR;
+    for (var k = 0u; k < n; k++) { nearest = min(nearest, shape_distance(first + k, point)); }
+    var sum = vec2<f32>(0.0);
+    var weight = 0.0;
+    for (var k = 0u; k < n; k++) {
+        let d = shape_distance(first + k, point);
+        if (d > nearest + 48.0) { continue; }
+        let w = exp(-(d - nearest) / 6.0);
+        sum += dome_offset(first + k, point, amount) * w;
+        weight += w;
+    }
+    return sum / max(weight, 1e-6);
 }
 
 struct VertexOut {
@@ -557,11 +619,12 @@ fn fs(e: VertexOut) -> @location(0) vec4<f32> {
         let slope = select(0.0, min(thick * rim_slope(t_rim) / bevel, 40.0), t_rim < 1.0) * smoothstep(0.0, 1.5 * bevel, mitre_reach);
         let cap = 0.5 * bevel;
         let size = u.header.xy * u.header.w;
-        // `dome:` a magnifying glass in the middle: towards the centre, it
-        // shows what is behind a little bigger. It fades out in the bevel,
-        // which already bends its own way.
-        let flat = t_rim;
-        let dome = (el.glass3.zw - p) * el.glass2.w * 0.14 * flat * u.header.w * glass;
+        // `dome:` a magnifying glass in the middle (see `dome_offset`): at
+        // 100 % the middle shows what is behind twice as big.
+        var dome = vec2<f32>(0.0);
+        if (abs(el.glass2.w) > 0.001) {
+            dome = body_dome(first, n, p, el.glass2.w * DOME_STRENGTH * glass) * u.header.w;
+        }
         let base = e.pos.xy + dome + ripple_push * u.header.w;
         // Red, green and blue each bend as their own index says, so where
         // the bevel bends hard a bright edge splits into a faint rainbow
