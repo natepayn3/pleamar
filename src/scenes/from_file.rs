@@ -22,11 +22,21 @@ pub fn read(path: &str) -> Result<Scene, String> {
 static READY: std::sync::Mutex<Option<(String, Scene)>> = std::sync::Mutex::new(None);
 /// The files the last compilation of each scene read: what to watch.
 static FILES: std::sync::Mutex<Option<(String, Vec<std::path::PathBuf>)>> = std::sync::Mutex::new(None);
+/// The logic files of the plugins of the last compilation of each scene: what the
+/// logic's watcher watches besides the scene's own `.luau`. Kept here so that it does
+/// not compile the whole scene again to find them out (a big shell's start compiled it
+/// twice, the second time while the first frame was being made).
+static PLUGIN_LOGIC: std::sync::Mutex<Option<(String, Vec<String>)>> = std::sync::Mutex::new(None);
+
+fn note_plugins(path: &str, e: &Scene) {
+    *PLUGIN_LOGIC.lock().unwrap() = Some((path.to_owned(), e.plugins.iter().map(|p| p.logic.to_string_lossy().into_owned()).collect()));
+}
 
 fn compile(path: &str) -> Result<Scene, String> {
     let (e, mut files) = crate::language::read_file(path)?;
     files.extend(e.attachments.iter().cloned());
     *FILES.lock().unwrap() = Some((path.to_owned(), files));
+    note_plugins(path, &e);
     Ok(e)
 }
 
@@ -212,8 +222,14 @@ pub fn watch(path: String, to_render: Sender<ToRender>, to_logic: Sender<Event>)
             // The scene's and its plugins': touching any of them reloads them.
             let all = |scene: &str| -> Vec<String> {
                 let mut v = vec![logic.clone()];
-                if let Ok(e) = read(scene) {
-                    v.extend(e.plugins.iter().map(|p| p.logic.to_string_lossy().into_owned()));
+                let known = PLUGIN_LOGIC.lock().unwrap().as_ref().filter(|(p, _)| p == scene).map(|(_, l)| l.clone());
+                match known {
+                    Some(l) => v.extend(l),
+                    None => {
+                        if let Ok(e) = read(scene) {
+                            v.extend(e.plugins.iter().map(|p| p.logic.to_string_lossy().into_owned()));
+                        }
+                    }
                 }
                 v
             };
@@ -289,6 +305,7 @@ pub fn watch(path: String, to_render: Sender<ToRender>, to_logic: Sender<Event>)
                 let t0 = std::time::Instant::now();
                 match crate::language::read_file(&path) {
                     Ok((e, files)) => {
+                        note_plugins(&path, &e);
                         println!("reload · {path} read in {:.1} ms{}", t0.elapsed().as_secs_f32() * 1000.0, if files.len() > 1 { format!(" · with {} more files", files.len() - 1) } else { String::new() });
                         // It may import other things now.
                         watched = files;
