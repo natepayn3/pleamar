@@ -290,6 +290,11 @@ struct Param {
 
 struct Compiler<'a> {
     e: Scene,
+    /// Where each fact's type is in `e.types`, by its name: the first one, as a search
+    /// from the start finds it. Brought up to date as it is asked (`e.types` only grows).
+    /// Every bare name in a sum or a comparison asks whether it is an enum, and searching
+    /// the list each time was a third of the compilation of a big scene.
+    type_index: std::cell::RefCell<(usize, HashMap<String, usize>)>,
     /// Synthesized syntax must survive the deferred passes, but not the load.
     generated: &'a typed_arena::Arena<Node>,
     /// Stacks that scroll: their zone, their property, how far, how much per notch and with which spring.
@@ -498,7 +503,7 @@ pub fn compile<'a>(tree: &'a [Entry], files: &'a [String], dirs: &'a [std::path:
             other => unreachable!("'{other}' is in the vocabulary, but it has no stiffness or damping"),
         })).collect(),
         under: Vec::new(), candidates: Vec::new(), zparents: vec![0], next_zparent: 1, zblock: None, rules: Vec::new(), errors: Vec::new(), declared: Vec::new(), used: Default::default(), current_class: String::new(),
-        scrolls: Vec::new(), row_scrolls: Default::default(), pending_surfaces: Vec::new(), pending_levels: Vec::new(), pending_reserves: Vec::new(), pending_keyboards: Vec::new(), pending_rates: Vec::new(), hover_mentions: Default::default(), zone_springs: Vec::new(), pending_anchors: Vec::new(), files, dirs, strict_files, libraries, boundary_of: HashMap::new(), permissions_of: HashMap::new(), pass: 0, next_origin: 0.0, values: HashMap::new(), ambiguous: Default::default(), instance_children: Vec::new(), from_library: Default::default(), unrequested: Default::default(), unwatched: Default::default(), hiding_noted: Default::default(), extra_noted: Default::default(), in_letters: Default::default(), in_cursor: Default::default(), scopes: Vec::new(), components: HashMap::new(), copies: 0, let_props: HashMap::new(), copy_props: Default::default(), later_copy: false, effects_depth: 0, in_slot: false, last_size: None, imposed_measure: None, pending_keyboard: None, prop_sites: HashMap::new(), arrays: HashMap::new(), elements: HashMap::new(), hoisted: HashSet::new(), in_hoisted: 0, hoisting: None, top: &[], rows: HashSet::new(), fold_scope: None, turns: HashMap::new(), folds: HashMap::new(), image_sites: HashMap::new(),
+        scrolls: Vec::new(), row_scrolls: Default::default(), pending_surfaces: Vec::new(), pending_levels: Vec::new(), pending_reserves: Vec::new(), pending_keyboards: Vec::new(), pending_rates: Vec::new(), hover_mentions: Default::default(), zone_springs: Vec::new(), pending_anchors: Vec::new(), files, dirs, strict_files, libraries, boundary_of: HashMap::new(), permissions_of: HashMap::new(), pass: 0, next_origin: 0.0, values: HashMap::new(), ambiguous: Default::default(), instance_children: Vec::new(), from_library: Default::default(), unrequested: Default::default(), unwatched: Default::default(), hiding_noted: Default::default(), extra_noted: Default::default(), in_letters: Default::default(), in_cursor: Default::default(), scopes: Vec::new(), components: HashMap::new(), copies: 0, let_props: HashMap::new(), copy_props: Default::default(), later_copy: false, effects_depth: 0, in_slot: false, last_size: None, imposed_measure: None, pending_keyboard: None, prop_sites: HashMap::new(), arrays: HashMap::new(), elements: HashMap::new(), hoisted: HashSet::new(), in_hoisted: 0, hoisting: None, top: &[], rows: HashSet::new(), fold_scope: None, turns: HashMap::new(), folds: HashMap::new(), image_sites: HashMap::new(), type_index: Default::default(),
     };
     // Two facts that always exist: what the surface really measures. The
     // render sets them when the compositor configures it.
@@ -1460,10 +1465,21 @@ impl<'a> Compiler<'a> {
         self.enum_between(c, from, c.i)
     }
 
+    /// The type of a fact, by its whole name (what `e.types.iter().find` gave, without searching).
+    fn type_of(&self, name: &str) -> Option<&(String, FactType)> {
+        let mut index = self.type_index.borrow_mut();
+        let (seen, by_name) = &mut *index;
+        for (k, (n, _)) in self.e.types.iter().enumerate().skip(*seen) {
+            by_name.entry(n.clone()).or_insert(k);
+        }
+        *seen = self.e.types.len();
+        by_name.get(name).map(|&k| &self.e.types[k])
+    }
+
     fn enum_between(&self, c: &Cur, from: usize, until: usize) -> Option<(String, Vec<String>)> {
         let [Token { kind: TokenKind::Id(n), .. }] = c.tokens.get(from..until)? else { return None };
         let g = self.global_quiet(n);
-        match self.e.types.iter().find(|(x, _)| *x == g) {
+        match self.type_of(&g) {
             Some((_, FactType::Enum(names))) => Some((n.clone(), names.clone())),
             _ => None,
         }
@@ -1640,7 +1656,7 @@ impl<'a> Compiler<'a> {
         } else if let Some(v) = self.values.get(n) {
             // The value of an enum: `mode == critical`.
             Ok(Expr::K(*v))
-        } else if let Some(k) = n.rsplit_once('.').and_then(|(fact, value)| match self.e.types.iter().find(|(x, _)| x == fact) {
+        } else if let Some(k) = n.rsplit_once('.').and_then(|(fact, value)| match self.type_of(fact) {
             Some((_, FactType::Enum(names))) => names.iter().position(|x| x == value),
             _ => None,
         }) {
@@ -3662,7 +3678,7 @@ impl<'a> Compiler<'a> {
             }
             // An enum fact is shown by its name, not by its number.
             let g = self.global(n);
-            if let (Some(h), Some((_, FactType::Enum(names)))) = (self.facts.get(&g), self.e.types.iter().find(|(x, _)| *x == g)) {
+            if let (Some(h), Some((_, FactType::Enum(names)))) = (self.facts.get(&g), self.type_of(&g)) {
                 return Ok(Piece::Name(h.e(), names.clone()));
             }
         }
