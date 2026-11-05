@@ -3353,6 +3353,34 @@ pub struct Gpu {
 
 /// The card the compositor paints with, by its PCI address (`0000:01:00.0`), if
 /// it has said (see `compositor_card`).
+static CARD_FULL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// What the render does with an error of the card nobody asked about (see where it is set).
+fn card_error(e: wgpu::Error) {
+    match e {
+        wgpu::Error::OutOfMemory { .. } => {
+            CARD_FULL.store(true, std::sync::atomic::Ordering::Relaxed);
+            eprintln!("render · the card is out of memory: {e}")
+        }
+        other if CARD_FULL.load(std::sync::atomic::Ordering::Relaxed) && left_invalid(&other) => {
+            eprintln!("render · what the card had no memory for is not used: {other}")
+        }
+        other => panic!("wgpu error: {other}"),
+    }
+}
+
+/// A wgpu error about using something that is not there: what the card had
+/// no memory to make (wgpu says «… is invalid» for it).
+fn left_invalid(e: &wgpu::Error) -> bool {
+    let mut text = e.to_string();
+    let mut source = std::error::Error::source(e);
+    while let Some(s) = source {
+        text.push_str(&s.to_string());
+        source = s.source();
+    }
+    matches!(e, wgpu::Error::Validation { .. }) && text.contains("is invalid")
+}
+
 static COMPOSITOR_CARD: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 /// The compositor says which card it paints with (`linux-dmabuf`'s main
@@ -3456,10 +3484,14 @@ impl Gpu {
         // said and lived through: what asked for it is not drawn. wgpu's own
         // answer is to panic, and a window manager's whole session went down
         // with it. Every other error still stops the program, as it did.
-        device.on_uncaptured_error(std::sync::Arc::new(|e: wgpu::Error| match e {
-            wgpu::Error::OutOfMemory { .. } => eprintln!("render · the card is out of memory: {e}"),
-            other => panic!("wgpu error: {other}"),
-        }));
+        //
+        // And what the card could not make is left invalid: using it later —a
+        // view of it, a copy into it— is a validation error of its own, and
+        // that one took the session down after the card had been full (05-11:
+        // `Texture with 'windows' label is invalid`). Once the card has been
+        // out of memory, an error about something invalid is said too, not
+        // panicked over: it is what the lack of memory left behind.
+        device.on_uncaptured_error(std::sync::Arc::new(card_error));
         let (format, alpha, non_blocking) = match first {
             Some(first) => {
                 let caps = first.get_capabilities(&adapter);
@@ -3982,9 +4014,19 @@ impl Gpu {
         );
     }
 
-    fn windows_texture(device: &wgpu::Device, (w, h, n): (u32, u32, u32)) -> (wgpu::Texture, wgpu::TextureView) {
+    fn windows_texture(device: &wgpu::Device, dims: (u32, u32, u32)) -> (wgpu::Texture, wgpu::TextureView) {
+        let t = Self::windows_texture_only(device, dims);
+        let v = Self::windows_view_of(&t);
+        (t, v)
+    }
+
+    fn windows_view_of(t: &wgpu::Texture) -> wgpu::TextureView {
+        t.create_view(&wgpu::TextureViewDescriptor { dimension: Some(wgpu::TextureViewDimension::D2Array), ..Default::default() })
+    }
+
+    fn windows_texture_only(device: &wgpu::Device, (w, h, n): (u32, u32, u32)) -> wgpu::Texture {
         // (Its size is checked by whoever grows it: `window_room`.)
-        let t = device.create_texture(&wgpu::TextureDescriptor {
+        device.create_texture(&wgpu::TextureDescriptor {
             label: Some("windows"),
             size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: n },
             mip_level_count: 1,
@@ -3995,9 +4037,7 @@ impl Gpu {
             // Painted into as well: video, made RGB there. And read back: a window shared.
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
-        });
-        let v = t.create_view(&wgpu::TextureViewDescriptor { dimension: Some(wgpu::TextureViewDimension::D2Array), ..Default::default() });
-        (t, v)
+        })
     }
 
     /// Room in the windows' texture for a piece of that size in that layer. If
@@ -4030,12 +4070,15 @@ impl Gpu {
             }
         }
         // And if the card cannot make it all the same, the texture there was stays.
+        // Its view is made only once the texture is there: a view of one the
+        // card said no to is a validation error, and that one is not caught here.
         let scope = self.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
-        let (t, v) = Self::windows_texture(&self.device, dims);
+        let t = Self::windows_texture_only(&self.device, dims);
         if let Some(e) = pollster::block_on(scope.pop()) {
             eprintln!("render · the windows' texture cannot grow to {}×{}×{} ({} MB): {e}; it stays {dw}×{dh}×{dn}", dims.0, dims.1, dims.2, bytes(dims) >> 20);
             return false;
         }
+        let v = Self::windows_view_of(&t);
         eprintln!("render · the windows' texture grows to {}×{}×{} ({} MB) for a picture of {w}×{h}", dims.0, dims.1, dims.2, bytes(dims) >> 20);
         self.windows = t;
         self.windows_view = v;
@@ -5608,5 +5651,31 @@ impl Summing {
         for (ticket, n) in self.checks {
             crate::platform::thumbnail_checked(ticket, n, None);
         }
+    }
+}
+
+/// The card out of memory, and then the texture it could not make used (05-11:
+/// a view of the windows' one took the session down). Needs a real card: a
+/// request of 64 GB, which any card says no to without keeping anything.
+#[cfg(test)]
+mod card_full {
+    #[test]
+    #[ignore = "asks a real graphics card; run with --ignored"]
+    fn what_was_not_made_is_not_panicked_over() {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default())).expect("a card");
+        let (device, _queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).expect("a device");
+        device.on_uncaptured_error(std::sync::Arc::new(super::card_error));
+        let side = device.limits().max_texture_dimension_2d.min(32768);
+        let layers = ((64u64 << 30) / (side as u64 * side as u64 * 4)).clamp(1, device.limits().max_texture_array_layers as u64) as u32;
+        let t = super::Gpu::windows_texture_only(&device, (side, side, layers));
+        // As before the fix: the view of what was not made. Its error is not a panic any more.
+        let _v = super::Gpu::windows_view_of(&t);
+        assert!(super::CARD_FULL.load(std::sync::atomic::Ordering::Relaxed), "the card said it had no memory for {side}×{side}×{layers}");
+        // Any other mistake still stops the program.
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            device.create_buffer(&wgpu::BufferDescriptor { label: None, size: 4, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::MAP_WRITE, mapped_at_creation: false });
+        }));
+        assert!(r.is_err(), "a real mistake still panics");
     }
 }
