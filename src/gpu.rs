@@ -3188,6 +3188,13 @@ pub fn compositor_card(dev: u64) {
 }
 
 impl Gpu {
+    /// Whether the compositor paints on another card than ours: `None` while
+    /// it has not said which it paints on (a compositor without linux-dmabuf 4).
+    #[cfg(target_os = "linux")]
+    pub fn compositor_on_another_card(&self) -> Option<bool> {
+        COMPOSITOR_CARD.get().map(|bus| self.adapter.get_info().device_pci_bus_id != *bus)
+    }
+
     /// It is created with the first surface that arrives: one is needed to know
     /// which adapter and which format are valid.
     /// With the first sheet's surface, if it has one: the card chosen has to be
