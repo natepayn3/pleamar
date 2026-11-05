@@ -3353,6 +3353,8 @@ pub struct Gpu {
 
 /// The card the compositor paints with, by its PCI address (`0000:01:00.0`), if
 /// it has said (see `compositor_card`).
+static INTEL_SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 static CARD_FULL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// What the render does with an error of the card nobody asked about (see where it is set).
@@ -3933,7 +3935,20 @@ impl Gpu {
         // of it for one button lit (#46). They are painted as the scene's
         // pipelines paint, BGRA with premultiplied alpha; `PLEAMAR_SWAPCHAIN=1`
         // keeps the swapchain, to compare.
-        let ours = self.format == wgpu::TextureFormat::Bgra8Unorm && self.alpha == wgpu::CompositeAlphaMode::PreMultiplied && std::env::var_os("PLEAMAR_SWAPCHAIN").is_none();
+        //
+        // On Intel cards they are not used unless `PLEAMAR_OWN_FRAMES=1`: there
+        // what pleamar painted came out under a grid of dots (a Kaby Lake HD 620
+        // and a UHD 600, #132) while the swapchain shows it right, and nobody
+        // with one of those cards has yet found which layout the compositor
+        // misreads. The log says which one was chosen, for whoever looks into it.
+        let intel = self.adapter.get_info().vendor == 0x8086;
+        let ours = self.format == wgpu::TextureFormat::Bgra8Unorm
+            && self.alpha == wgpu::CompositeAlphaMode::PreMultiplied
+            && std::env::var_os("PLEAMAR_SWAPCHAIN").is_none()
+            && (!intel || std::env::var_os("PLEAMAR_OWN_FRAMES").is_some());
+        if intel && !ours && std::env::var_os("PLEAMAR_SWAPCHAIN").is_none() && !INTEL_SAID.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            println!("render · an Intel card: the system's swapchain, not frames of our own (they came out dotted there, #132); PLEAMAR_OWN_FRAMES=1 tries them");
+        }
         if ours
             && matches!(l.target, Target::Surface(_))
             && let Some(frames) = l.window.own_frames()

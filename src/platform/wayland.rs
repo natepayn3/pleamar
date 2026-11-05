@@ -215,8 +215,10 @@ impl OwnFrames {
     fn make(&mut self, device: &wgpu::Device) -> Result<(), String> {
         let d = DMABUFS.get().ok_or("the compositor takes no frames on the card")?;
         let layouts = ARGB_LAYOUTS.lock().unwrap().clone();
+        let mut modifier = 0;
         for _ in 0..OWN_FRAMES {
             let e = crate::dmabuf::export(device, self.px, &layouts)?;
+            modifier = e.modifier;
             let params = d.global.create_params(&d.qh, Silent);
             for (k, (offset, stride)) in e.planes.iter().enumerate() {
                 params.add(std::os::fd::AsFd::as_fd(&e.fd), k as u32, *offset, *stride, (e.modifier >> 32) as u32, e.modifier as u32);
@@ -227,7 +229,7 @@ impl OwnFrames {
             self.frames.push(OwnFrame { texture: e.texture, buffer, busy, fd: e.fd });
         }
         let _ = d.connection.flush();
-        println!("render · {} frames of our own of {}×{} handed to the compositor, with what changed in each", self.frames.len(), self.px.0, self.px.1);
+        println!("render · {} frames of our own of {}×{} handed to the compositor, with what changed in each (layout {modifier:#018x})", self.frames.len(), self.px.0, self.px.1);
         Ok(())
     }
 }
