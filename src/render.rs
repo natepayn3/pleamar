@@ -4808,6 +4808,14 @@ pub fn run(
                 // straight away: two frames per refresh—, but it does say something else: whether
                 // anyone is watching.
                 let clock_from = Instant::now();
+                // The deadline was set by the last round's period. If the pace has just
+                // risen (a `rate: 60, 12 while idle` that stopped being idle in this round),
+                // that deadline is still a slow period away: waiting it out put the first
+                // moving frame a whole slow step after the one that started the animation,
+                // which jumped a third of the way in one go. Never wait longer than the new period.
+                if next_frame > right_now + period {
+                    next_frame = right_now + period;
+                }
                 if next_frame > right_now {
                     // While waiting, the capture that a sheet with a lens
                     // needed in order to paint may arrive: then it is painted right away, without waiting
