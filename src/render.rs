@@ -5709,6 +5709,12 @@ fn make_card_backdrop(g: &Gpu, sheet: u32, fourcc: u32, size: (u32, u32)) {
     if !g.device.features().contains(wgpu::Features::VULKAN_EXTERNAL_MEMORY_DMA_BUF) {
         return refuse("the card does not share its memory with the compositor".into());
     }
+    // A buffer made on our card is one the compositor cannot copy into from its own:
+    // Hyprland on the Intel of a laptop aborts in Mesa doing so (issue 133). The
+    // thumbnails check the same (`answer_thumbnail_wants`).
+    if g.compositor_on_another_card() == Some(true) {
+        return refuse("the compositor copies on another card".into());
+    }
     let layouts = crate::platform::backdrop_layouts(fourcc);
     match crate::dmabuf::export_to_capture(&g.device, size, &layouts) {
         Ok(e) => {

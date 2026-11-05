@@ -149,6 +149,11 @@ pub struct DrawList {
     /// a shader that reads the time, an image that moves—: comparing elements
     /// cannot say where the frame changed, so it is painted whole.
     pub timed: bool,
+    /// Where the bodies' tile tables start in `points` (see `tile_bodies`):
+    /// what comes before is the paths' points, what comes after is worked out
+    /// again every frame from the shapes and says nothing new about where the
+    /// frame changed.
+    pub tiles_from: usize,
     /// The stretches of the drawing (see `Stretch`), by where each starts in the
     /// order of painting, and for which instructions and order they were found.
     stretch_list: Vec<Stretch>,
@@ -223,21 +228,25 @@ impl PreviousFrame {
         fn bits(v: &[f32]) -> &[u32] {
             bytemuck::cast_slice(v)
         }
+        // The bodies' tile tables at the end of `points` follow from the
+        // shapes (`tile_bodies`), and so does where each starts (`a.w` of a
+        // body's first shape): neither says anything the shapes do not.
+        let points = &d.points[..d.tiles_from.min(d.points.len())];
         let same_layout = self.valid
             && self.shapes.len() == d.shapes.len()
-            && self.points.len() == d.points.len()
+            && self.points.len() == points.len()
             && self.stops.len() == d.stops.len()
             && self.elements.len() == d.elements.len()
             && self.offscreen_groups == d.offscreen_groups;
         let known = same_layout && {
-            let same_points = bits(&self.points) == bits(&d.points);
+            let same_points = bits(&self.points) == bits(points);
             let same_stops = bits(&self.stops) == bits(&d.stops);
             // A shape changes if its numbers change, or if it is a path and the points have changed.
             let shape_changed: Vec<bool> = self
                 .shapes
                 .chunks_exact(PER_SHAPE)
                 .zip(d.shapes.chunks_exact(PER_SHAPE))
-                .map(|(a, b)| bits(a) != bits(b) || (!same_points && b[0] as u32 == 4))
+                .map(|(a, b)| bits(&a[..3]) != bits(&b[..3]) || bits(&a[4..]) != bits(&b[4..]) || (!same_points && b[0] as u32 == 4))
                 .collect();
             let changed = |k: f32| k >= 0.0 && shape_changed.get(k as usize).copied().unwrap_or(true);
             for (a, b) in self.elements.chunks_exact(PER_ELEMENT).zip(d.elements.chunks_exact(PER_ELEMENT)) {
@@ -271,7 +280,8 @@ impl PreviousFrame {
         };
         self.shapes.clone_from(&d.shapes);
         self.shape_bounds.clone_from(&d.shape_bounds);
-        self.points.clone_from(&d.points);
+        self.points.clear();
+        self.points.extend_from_slice(points);
         self.stops.clone_from(&d.stops);
         self.elements.clone_from(&d.elements);
         self.offscreen_groups.clone_from(&d.offscreen_groups);
@@ -654,6 +664,74 @@ fn glass_options(e: &mut [f32], g: Option<&crate::scene::Glass>, b: [f32; 4], c:
     e[39] = g.milk.eval(c);
     // Its own slot (`glass4`): tint, saturation, mirror, highlight.
     e[60..64].copy_from_slice(&[g.tint.eval(c), g.vivid.eval(c), g.mirror.eval(c), g.highlight.eval(c)]);
+}
+
+/// The box, in the scene's plane, outside which a shape (as `FlatShape::encode`
+/// wrote it) measures more than `reach` in the shader: its own box grown by
+/// that much in its own units, which an ellipse squashed by its scale and a
+/// group that stretches more one way than the other need more of. `None`: a
+/// shape that does not exist.
+fn shape_reach(s: &[f32], reach: f32) -> Option<[f32; 4]> {
+    let (kind, stroke, cx, cy, mx, my, radius, rotation, ex, ey) = (s[0] as u32, s[2], s[4], s[5], s[6], s[7], s[8], s[9], s[10], s[11]);
+    let factor = s[18];
+    if factor <= 1e-4 {
+        return Some([f32::MIN, f32::MIN, f32::MAX, f32::MAX]);
+    }
+    let mut m = reach / factor;
+    let (hx, hy) = match kind {
+        0 => {
+            m *= ex.abs().max(ey.abs()) / ex.abs().min(ey.abs()).max(1e-4);
+            (radius * ex.abs(), radius * ey.abs())
+        }
+        1 => {
+            if mx < 0.5 || my < 0.5 {
+                return None;
+            }
+            (mx, my)
+        }
+        2 => (radius, radius),
+        3 => {
+            let l = mx.hypot(my);
+            (l, l)
+        }
+        _ => (mx.abs(), my.abs()),
+    };
+    let (mut hx, mut hy) = (hx + stroke.max(0.0) * 0.5 + m, hy + stroke.max(0.0) * 0.5 + m);
+    if rotation != 0.0 {
+        let r = hx.hypot(hy);
+        (hx, hy) = (r, r);
+    }
+    if !(hx.is_finite() && hy.is_finite()) || hx > 1e7 || hy > 1e7 {
+        return Some([f32::MIN, f32::MIN, f32::MAX, f32::MAX]);
+    }
+    let inverse = crate::shapes::Affine { m: [s[12], s[13], s[14], s[15]], t: [s[16], s[17]] };
+    Some(inverse.inverse().bounds([cx - hx, cy - hy, cx + hx, cy + hy]))
+}
+
+/// Whether all of that rectangle of the scene's plane is so deep inside the
+/// hole of an outline round a box or an ellipse that the outline measures more
+/// than `reach` everywhere in it. What is that deep in is convex (in the
+/// shape's own units, and so in the plane's), so its four corners say it.
+fn deep_in_hole(s: &[f32], r: [f32; 4], reach: f32) -> bool {
+    let (kind, stroke, cx, cy, mx, my, radius, rotation, ex, ey, factor) = (s[0] as u32, s[2], s[4], s[5], s[6], s[7], s[8], s[9], s[10], s[11], s[18]);
+    if factor <= 1e-4 {
+        return false;
+    }
+    let need = -(stroke * 0.5 + reach / factor);
+    let (sn, cs) = rotation.sin_cos();
+    [(r[0], r[1]), (r[2], r[1]), (r[0], r[3]), (r[2], r[3])].iter().all(|&(x, y)| {
+        let (x, y) = (s[12] * x + s[13] * y + s[16], s[14] * x + s[15] * y + s[17]);
+        let (qx, qy) = (x - cx, y - cy);
+        let (px, py) = if rotation == 0.0 { (qx, qy) } else { (cs * qx + sn * qy, -sn * qx + cs * qy) };
+        let d = match kind {
+            0 => ((px / ex).hypot(py / ey) - radius) * ex.abs().min(ey.abs()),
+            _ => {
+                let (qx, qy) = (px.abs() - mx + radius, py.abs() - my + radius);
+                qx.max(0.0).hypot(qy.max(0.0)) + qx.max(qy).min(0.0) - radius
+            }
+        };
+        d < need
+    })
 }
 
 /// The width of a glass's bevel: a third of its short side, not going over 30 px.
@@ -1662,6 +1740,101 @@ impl DrawList {
     }
 
     /// An element only exists if its box, clipped, touches the screen.
+    /// A big body —a bar round the screen, a frame with an audio visualiser
+    /// standing on it— is one quad over all of its box, and every pixel of it
+    /// used to go through all of its shapes, twice with a shadow: a frame of
+    /// 88 shapes on a 3440×1440 monitor was close to a thousand million
+    /// distances a frame, most of them for the empty middle of the screen.
+    /// Here its box is cut into tiles of `BODY_TILE` px, and each tile is told
+    /// which of the body's shapes can reach it: as near as the body can be seen
+    /// (its edge, its shadow), plus as far as any two of its shapes melt
+    /// (half again, for the smooth minimum to have let go), plus its dome's
+    /// handover. A shape farther than that changes nothing a pixel there shows,
+    /// so the shader only measures those, and a tile none reaches is not
+    /// painted at all. The table goes at the end of `points`, and the body's
+    /// first shape says where (`a.w`, one more than the place; 0: no table).
+    fn tile_bodies(&mut self) {
+        const BODY_TILE: f32 = 64.0;
+        const LEAST_SHAPES: usize = 6;
+        const LEAST_TILES: usize = 8;
+        const MOST_TILES: usize = 16384;
+        self.tiles_from = self.points.len();
+        let mut pairs: Vec<(u32, u32)> = Vec::new();
+        for k in 0..self.element_count() {
+            let e = &self.elements[k * PER_ELEMENT..(k + 1) * PER_ELEMENT];
+            if e[0] != 0.0 {
+                continue;
+            }
+            let (first, n) = (e[1] as usize, e[2] as usize);
+            if n == 0 || (first + n) * PER_SHAPE > self.shapes.len() {
+                continue;
+            }
+            self.shapes[first * PER_SHAPE + 3] = 0.0;
+            let b = [e[4], e[5], e[6], e[7]];
+            let (x0, y0) = ((b[0] / BODY_TILE).floor() * BODY_TILE, (b[1] / BODY_TILE).floor() * BODY_TILE);
+            let cols = (((b[2] - x0) / BODY_TILE).ceil().max(1.0)) as usize;
+            let rows = (((b[3] - y0) / BODY_TILE).ceil().max(1.0)) as usize;
+            if n < LEAST_SHAPES || cols * rows < LEAST_TILES || cols * rows > MOST_TILES {
+                continue;
+            }
+            let shadow = (e[31] > 0.0).then_some((e[28], e[29], e[30].max(0.0)));
+            let dome = e[40] > 0.0 && e[55].abs() > 0.0005;
+            let melt = (first..first + n).map(|j| self.shapes[j * PER_SHAPE + 1].max(0.0)).fold(0.0f32, f32::max);
+            let seen = 4.0f32.max(shadow.map_or(0.0, |s| s.2 + 2.0)).max(if dome { 52.0 } else { 0.0 });
+            let reach = seen + 1.5 * melt + 4.0;
+            let tile_rect = |cx: usize, cy: usize| {
+                let (x, y) = (x0 + cx as f32 * BODY_TILE, y0 + cy as f32 * BODY_TILE);
+                [x, y, x + BODY_TILE, y + BODY_TILE]
+            };
+            pairs.clear();
+            for j in 0..n {
+                let s = &self.shapes[(first + j) * PER_SHAPE..(first + j + 1) * PER_SHAPE];
+                let Some(near) = shape_reach(s, reach) else { continue };
+                let near = match shadow {
+                    Some((sx, sy, _)) => [near[0].min(near[0] + sx), near[1].min(near[1] + sy), near[2].max(near[2] + sx), near[3].max(near[3] + sy)],
+                    None => near,
+                };
+                let c0 = (((near[0] - x0) / BODY_TILE).floor().max(0.0) as usize).min(cols);
+                let r0 = (((near[1] - y0) / BODY_TILE).floor().max(0.0) as usize).min(rows);
+                let c1 = (((near[2] - x0) / BODY_TILE).ceil().max(0.0) as usize).min(cols);
+                let r1 = (((near[3] - y0) / BODY_TILE).ceil().max(0.0) as usize).min(rows);
+                // An outline round a box or an ellipse (a frame's ring) reaches
+                // across the whole screen: its hole does not.
+                let hollow = s[2] > 0.0 && (s[0] as u32 == 0 || s[0] as u32 == 1) && (c1 - c0) * (r1 - r0) > 4;
+                for cy in r0..r1 {
+                    for cx in c0..c1 {
+                        if hollow {
+                            let t = tile_rect(cx, cy);
+                            let deep = deep_in_hole(s, t, reach) && shadow.is_none_or(|(sx, sy, _)| deep_in_hole(s, [t[0] - sx, t[1] - sy, t[2] - sx, t[3] - sy], reach));
+                            if deep {
+                                continue;
+                            }
+                        }
+                        pairs.push(((cy * cols + cx) as u32, j as u32));
+                    }
+                }
+            }
+            // In the order of the tiles, and within each in the body's own order: the smooth minimum depends on it.
+            pairs.sort_by_key(|p| p.0);
+            let at = self.points.len();
+            self.points.extend_from_slice(&[x0, y0, BODY_TILE, cols as f32, rows as f32]);
+            let slots = self.points.len();
+            self.points.resize(slots + cols * rows * 2, 0.0);
+            let mut i = 0;
+            while i < pairs.len() {
+                let tile = pairs[i].0 as usize;
+                let start = self.points.len();
+                while i < pairs.len() && pairs[i].0 as usize == tile {
+                    self.points.push(pairs[i].1 as f32);
+                    i += 1;
+                }
+                self.points[slots + tile * 2] = start as f32;
+                self.points[slots + tile * 2 + 1] = (self.points.len() - start) as f32;
+            }
+            self.shapes[first * PER_SHAPE + 3] = (at + 1) as f32;
+        }
+    }
+
     fn element(&mut self, kind: f32, bounds: [f32; 4], clips: &[(usize, [f32; 4])], fill: impl FnOnce(&mut [f32])) {
         // What does not fall on the surface nor on any open popup does not exist.
         let touches = |v: &[f32; 4]| bounds[0] < v[2] && bounds[2] > v[0] && bounds[1] < v[3] && bounds[3] > v[1];
@@ -2367,6 +2540,15 @@ impl DrawList {
                         bounds = union(Some(bounds), [bounds[0] + sx - d, bounds[1] + sy - d, bounds[2] + sx + d, bounds[3] + sy + d]);
                     }
                     let a = alpha.eval(c).clamp(0.0, 1.0) * mult;
+                    // What is invisible does not take up even a quad, as a loose
+                    // shape does not: everything a body paints —its fill, its
+                    // glass, its shadow, its border— is weighed by it, and the
+                    // shader threw it away pixel by pixel. A shell with a body
+                    // for each of its looks, all but one at opacity 0 and each
+                    // the size of the screen, paid for forty screens a frame.
+                    if a <= 0.001 {
+                        continue;
+                    }
                     if let Some((sx, sy, sd, sa)) = shadow.filter(|s| a > 0.01 && s.3 > 0.01) {
                         self.check_shadow(shape_only, (sx, sy, sd));
                         let _ = sa;
@@ -2827,6 +3009,7 @@ impl DrawList {
             self.element(9.0, [0.0, size.1 - HUD_HEIGHT, size.0, size.1], &[], |e| Affine::IDENTITY.encode(&mut e[44..52]));
         }
         self.stops = placed_stops;
+        self.tile_bodies();
         // An empty store can be neither bound nor written.
         if self.stops.is_empty() {
             self.stops.resize(4, 0.0);
@@ -3188,6 +3371,13 @@ pub fn compositor_card(dev: u64) {
 }
 
 impl Gpu {
+    /// Whether the compositor paints on another card than ours: `None` while
+    /// it has not said which it paints on (a compositor without linux-dmabuf 4).
+    #[cfg(target_os = "linux")]
+    pub fn compositor_on_another_card(&self) -> Option<bool> {
+        COMPOSITOR_CARD.get().map(|bus| self.adapter.get_info().device_pci_bus_id != *bus)
+    }
+
     /// It is created with the first surface that arrives: one is needed to know
     /// which adapter and which format are valid.
     /// With the first sheet's surface, if it has one: the card chosen has to be
