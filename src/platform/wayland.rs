@@ -514,7 +514,15 @@ struct CaptureFor {
     dmabuf: Mutex<Option<(u32, u32, u32)>>,
     /// The buffer on the card it was asked to copy into.
     on_card: Mutex<Option<Arc<super::CardBackdrop>>>,
+    /// The compositor says the picture is of what is behind our surface, without it (pleamar-wm's
+    /// `WITHOUT_YOU` flag): it is the background as it is, and nothing of ours is unmixed from it.
+    without_us: std::sync::atomic::AtomicBool,
 }
+
+/// pleamar-wm's flag on a screencopy frame (after `y_invert`, 1): the picture leaves out the surfaces of the
+/// program that asked. Under our opaque parts —a grid of pictures— the background cannot be unmixed, and
+/// left holes a dome magnified into view; with it there is nothing to unmix.
+const WITHOUT_YOU: u32 = 1 << 16;
 
 /// A capture made of several small ones: the glass of a shell is a frame round the screen, and the one box
 /// that holds it all is the whole screen, of which the compositor would read back (and we would upload) twenty
@@ -613,6 +621,13 @@ impl Dispatch2<ZwlrScreencopyFrameV1, State> for CaptureFor {
                 *self.dmabuf.lock().unwrap() = Some((format, width, height));
                 CARD_OFFERED.store(true, Ordering::Relaxed);
             }
+            E::Flags { flags } => {
+                let bits = match flags {
+                    wayland_client::WEnum::Value(f) => f.bits(),
+                    wayland_client::WEnum::Unknown(v) => v,
+                };
+                self.without_us.store(bits & WITHOUT_YOU != 0, Ordering::Relaxed);
+            }
             E::BufferDone => {
                 let id = self.target.id;
                 // On the card, if the render has made a buffer of the very size and format offered:
@@ -672,7 +687,8 @@ impl Dispatch2<ZwlrScreencopyFrameV1, State> for CaptureFor {
             }
             E::Ready { .. } => {
                 let id = self.target.id;
-                let opacity = *self.target.opacity.lock().unwrap();
+                // Without us in it, there is nothing of ours to take out of it: as if ours were not there.
+                let opacity = if self.without_us.load(Ordering::Relaxed) { 0.0 } else { *self.target.opacity.lock().unwrap() };
                 let Some((parts, k)) = &self.part else {
                     if let Some(card) = self.on_card.lock().unwrap().take() {
                         let _ = e.to_render.send(ToRender::Backdrop(Box::new(super::Backdrop { sheet: id, width: card.size.0, height: card.size.1, stride: 0, opacity, data: None, rects: Vec::new(), card: Some(card), offer: None })));
@@ -929,10 +945,10 @@ impl PlatformWindow for WaylandWindow {
             if rects.len() >= 2 && !PARTS_BROKEN.load(Ordering::Relaxed) && !on_card {
                 let parts = Arc::new(Mutex::new(Parts { hull: bounds, rects: rects.clone(), valid: Vec::new(), over: false }));
                 for (k, r) in rects.iter().enumerate() {
-                    frames.push(manager.capture_output_region(0, &output, x + r[0], y + r[1], r[2], r[3], &qh, CaptureFor { target: d.clone(), on_change, format: Mutex::new(None), part: Some((parts.clone(), k)), dmabuf: Mutex::new(None), on_card: Mutex::new(None) }));
+                    frames.push(manager.capture_output_region(0, &output, x + r[0], y + r[1], r[2], r[3], &qh, CaptureFor { target: d.clone(), on_change, format: Mutex::new(None), part: Some((parts.clone(), k)), dmabuf: Mutex::new(None), on_card: Mutex::new(None), without_us: std::sync::atomic::AtomicBool::new(false) }));
                 }
             } else {
-                frames.push(manager.capture_output_region(0, &output, x + bounds[0], y + bounds[1], bounds[2], bounds[3], &qh, CaptureFor { target: d.clone(), on_change, format: Mutex::new(None), part: None, dmabuf: Mutex::new(None), on_card: Mutex::new(None) }));
+                frames.push(manager.capture_output_region(0, &output, x + bounds[0], y + bounds[1], bounds[2], bounds[3], &qh, CaptureFor { target: d.clone(), on_change, format: Mutex::new(None), part: None, dmabuf: Mutex::new(None), on_card: Mutex::new(None), without_us: std::sync::atomic::AtomicBool::new(false) }));
             }
         };
         // With frames of its own, after the frame just handed over, from the thread that hands
