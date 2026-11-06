@@ -437,10 +437,35 @@ struct Lens {
     measurements: usize,
 }
 
+impl Lens {
+    /// Where something as long as from `a` to `b` ends, starting here.
+    fn plus(self, b: Lens, a: Lens) -> Lens {
+        let f = |s: usize, b: usize, a: usize| s + b - a;
+        Lens {
+            shapes: f(self.shapes, b.shapes, a.shapes),
+            shape_bounds: f(self.shape_bounds, b.shape_bounds, a.shape_bounds),
+            points: f(self.points, b.points, a.points),
+            stops: f(self.stops, b.stops, a.stops),
+            elements: f(self.elements, b.elements, a.elements),
+            offscreen_groups: f(self.offscreen_groups, b.offscreen_groups, a.offscreen_groups),
+            particle_marks: f(self.particle_marks, b.particle_marks, a.particle_marks),
+            blend_marks: f(self.blend_marks, b.blend_marks, a.blend_marks),
+            picture_marks: f(self.picture_marks, b.picture_marks, a.picture_marks),
+            glass_marks: f(self.glass_marks, b.glass_marks, a.glass_marks),
+            glass_regions: f(self.glass_regions, b.glass_regions, a.glass_regions),
+            windows_drawn: f(self.windows_drawn, b.windows_drawn, a.windows_drawn),
+            fields: f(self.fields, b.fields, a.fields),
+            selectable: f(self.selectable, b.selectable, a.selectable),
+            measurements: f(self.measurements, b.measurements, a.measurements),
+        }
+    }
+}
+
 /// What a stretch made the last time it was put together, and from what: if
-/// nothing it read changed, it comes in as it came in then and starts where it
-/// started then, what it makes is what it made, number for number —the same
-/// shapes at the same places, so every index in it still holds—. It is copied
+/// nothing it read changed and it comes in as it came in then, what it makes is
+/// what it made, number for number, only further along the lists if what came
+/// before it made more or less (its own indices are moved along with it, see
+/// `moved_along`). It is copied
 /// from the frame before instead of being put together again: a window's frame
 /// with an agent's light breathing in its title made all of a window manager's
 /// thirty thousand instructions again, every frame, for those few.
@@ -1106,6 +1131,65 @@ impl DrawList {
         None
     }
 
+    /// A stretch just copied from the frame before to another place in the
+    /// lists (it started at `was` then, at `now` in this one): what in it says
+    /// where something of its own is goes along with it —a path's points, a
+    /// body's shapes, a clip's shape, a gradient's stops, a layer's elements,
+    /// the marks on its elements—. What it points to from before it (a clip
+    /// opened outside it) stays: the entry it is copied with says it is the
+    /// same. Without this a stretch was only copied where it had started, so
+    /// one shape more or less early in the drawing —a workspace dot fading in
+    /// one monitor's bar— put together everything after it again, every frame
+    /// it lasted, on every monitor's copy (#137).
+    fn moved_along(&mut self, was: Lens, now: Lens) {
+        fn by(from: usize, to: usize, unit: usize) -> (f32, f32) {
+            ((from / unit) as f32, (to / unit) as f32 - (from / unit) as f32)
+        }
+        let shift = |v: f32, (from, d): (f32, f32)| if v >= from { v + d } else { v };
+        let shapes = by(was.shapes, now.shapes, PER_SHAPE);
+        let points = by(was.points, now.points, 2);
+        let stops = by(was.stops, now.stops, 4);
+        let elements = (was.elements / PER_ELEMENT) as i64 - (now.elements / PER_ELEMENT) as i64;
+        if points.1 != 0.0 {
+            for s in self.shapes[now.shapes..].chunks_exact_mut(PER_SHAPE) {
+                if s[0] == 4.0 {
+                    s[8] = shift(s[8], points);
+                }
+            }
+        }
+        for e in self.elements[now.elements..].chunks_exact_mut(PER_ELEMENT) {
+            for j in 32..36 {
+                if e[j] >= 0.0 {
+                    e[j] = shift(e[j], shapes);
+                }
+            }
+            if e[0] == 0.0 {
+                e[1] = shift(e[1], shapes);
+                if e[15] >= 1.0 {
+                    e[36] = shift(e[36], stops);
+                }
+            } else if e[0] == 1.0 && e[23] == 1.0 && e[15] >= 1.0 {
+                e[20] = shift(e[20], stops);
+            }
+        }
+        if elements != 0 {
+            let from = (was.elements / PER_ELEMENT) as u32;
+            let at = |v: u32| if v >= from { (v as i64 - elements) as u32 } else { v };
+            for (r, _) in &mut self.offscreen_groups[now.offscreen_groups..] {
+                *r = at(r.start)..at(r.end);
+            }
+            for m in &mut self.blend_marks[now.blend_marks..] {
+                m.0 = at(m.0);
+            }
+            for m in &mut self.picture_marks[now.picture_marks..] {
+                m.0 = at(m.0);
+            }
+            for m in &mut self.glass_marks[now.glass_marks..] {
+                *m = at(*m);
+            }
+        }
+    }
+
     fn lens(&self, stops: usize) -> Lens {
         Lens {
             shapes: self.shapes.len(),
@@ -1139,8 +1223,12 @@ impl DrawList {
         let mut groups: Vec<Stretch> = Vec::new();
         for (p, idx) in sequence.iter().enumerate() {
             match &instrs[*idx] {
-                Instr::Opacity(Some(_)) | Instr::Fade(_) | Instr::Effect(_) | Instr::Transform(Some(_)) | Instr::Clip(Some(_)) => open.push(p),
-                Instr::Opacity(None) | Instr::Transform(None) | Instr::Clip(None) => {
+                // A body, from its first shape to its fill, is one too: a shell
+                // drawn out of loose bodies —a bar's pieces, each workspace
+                // dot— had thousands of instructions in none, put together
+                // again every frame anything moved (#137).
+                Instr::Opacity(Some(_)) | Instr::Fade(_) | Instr::Effect(_) | Instr::Transform(Some(_)) | Instr::Clip(Some(_)) | Instr::Group { .. } => open.push(p),
+                Instr::Opacity(None) | Instr::Transform(None) | Instr::Clip(None) | Instr::Fill { .. } => {
                     if let Some(o) = open.pop() {
                         groups.push(Stretch { from: o, to: p + 1 });
                     }
@@ -2210,16 +2298,20 @@ impl DrawList {
                             && e.selectable <= last.selectable.len()
                             && e.measurements <= last.measurements.len()
                     };
+                    // Where it starts in the lists need not be where it started:
+                    // what it made is moved along (see `moved_along`).
                     let same = |k: &Kept| {
                         k.copyable
                             && k.entry == entry
-                            && k.starts == starts
+                            // (Points go in pairs: a path says which pair it starts at.)
+                            && (k.starts.points + starts.points) % 2 == 0
                             && fits(k)
                             && k.facts.iter().zip(&k.fact_values).all(|(f, v)| c.facts.get(*f as usize).is_some_and(|x| x.to_bits() == v.to_bits()))
                             && k.props.iter().zip(&k.prop_values).all(|(p, v)| c.props.get(*p as usize).is_some_and(|x| x.x.to_bits() == v.0.to_bits() && x.v.to_bits() == v.1.to_bits()))
                     };
                     if copying && self.kept.get(which).and_then(Option::as_ref).is_some_and(same) {
-                        let k = self.kept[which].as_ref().unwrap();
+                        // Taken out while it is copied: the lists are moved along meanwhile.
+                        let k = self.kept[which].take().unwrap();
                         let (a, b) = (k.starts, k.ends);
                         let last = &self.last;
                         self.shapes.extend_from_slice(&last.shapes[a.shapes..b.shapes]);
@@ -2243,6 +2335,9 @@ impl DrawList {
                                 }
                             }
                         }
+                        if a != starts {
+                            self.moved_along(a, starts);
+                        }
                         tip.note_again(&k.keys);
                         for f in &k.facts {
                             self.reads.fact(*f as usize);
@@ -2250,6 +2345,13 @@ impl DrawList {
                         for p in &k.props {
                             self.reads.prop(*p as usize);
                         }
+                        // Next frame copies it from where it is in this one.
+                        let mut k = k;
+                        if a != starts {
+                            k.ends = starts.plus(b, a);
+                            k.starts = starts;
+                        }
+                        self.kept[which] = Some(k);
                         copied += 1;
                         next = to;
                         continue;
