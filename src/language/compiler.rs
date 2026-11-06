@@ -319,6 +319,8 @@ struct Compiler<'a> {
     pending_rates: Vec<(usize, usize, u32, &'a [Token], (usize, usize))>,
     /// `anchor: corner`, with `corner` a fact: which surface, which name and where.
     pending_anchors: Vec<(usize, String, (usize, usize))>,
+    /// `screens: on_screen`: a text fact, looked for at the end like an anchor's.
+    pending_screens: Vec<(usize, String, (usize, usize))>,
     /// The names of the files it is made of, to say where something is.
     files: &'a [String],
     /// Which files, by their number, are `strict` libraries.
@@ -503,7 +505,7 @@ pub fn compile<'a>(tree: &'a [Entry], files: &'a [String], dirs: &'a [std::path:
             other => unreachable!("'{other}' is in the vocabulary, but it has no stiffness or damping"),
         })).collect(),
         under: Vec::new(), candidates: Vec::new(), zparents: vec![0], next_zparent: 1, zblock: None, rules: Vec::new(), errors: Vec::new(), declared: Vec::new(), used: Default::default(), current_class: String::new(),
-        scrolls: Vec::new(), row_scrolls: Default::default(), pending_surfaces: Vec::new(), pending_levels: Vec::new(), pending_reserves: Vec::new(), pending_keyboards: Vec::new(), pending_rates: Vec::new(), hover_mentions: Default::default(), zone_springs: Vec::new(), pending_anchors: Vec::new(), files, dirs, strict_files, libraries, boundary_of: HashMap::new(), permissions_of: HashMap::new(), pass: 0, next_origin: 0.0, values: HashMap::new(), ambiguous: Default::default(), instance_children: Vec::new(), from_library: Default::default(), unrequested: Default::default(), unwatched: Default::default(), hiding_noted: Default::default(), extra_noted: Default::default(), in_letters: Default::default(), in_cursor: Default::default(), scopes: Vec::new(), components: HashMap::new(), copies: 0, let_props: HashMap::new(), copy_props: Default::default(), later_copy: false, effects_depth: 0, in_slot: false, last_size: None, imposed_measure: None, pending_keyboard: None, prop_sites: HashMap::new(), arrays: HashMap::new(), elements: HashMap::new(), hoisted: HashSet::new(), in_hoisted: 0, hoisting: None, top: &[], rows: HashSet::new(), fold_scope: None, turns: HashMap::new(), folds: HashMap::new(), image_sites: HashMap::new(), type_index: Default::default(),
+        scrolls: Vec::new(), row_scrolls: Default::default(), pending_surfaces: Vec::new(), pending_levels: Vec::new(), pending_reserves: Vec::new(), pending_keyboards: Vec::new(), pending_rates: Vec::new(), hover_mentions: Default::default(), zone_springs: Vec::new(), pending_anchors: Vec::new(), pending_screens: Vec::new(), files, dirs, strict_files, libraries, boundary_of: HashMap::new(), permissions_of: HashMap::new(), pass: 0, next_origin: 0.0, values: HashMap::new(), ambiguous: Default::default(), instance_children: Vec::new(), from_library: Default::default(), unrequested: Default::default(), unwatched: Default::default(), hiding_noted: Default::default(), extra_noted: Default::default(), in_letters: Default::default(), in_cursor: Default::default(), scopes: Vec::new(), components: HashMap::new(), copies: 0, let_props: HashMap::new(), copy_props: Default::default(), later_copy: false, effects_depth: 0, in_slot: false, last_size: None, imposed_measure: None, pending_keyboard: None, prop_sites: HashMap::new(), arrays: HashMap::new(), elements: HashMap::new(), hoisted: HashSet::new(), in_hoisted: 0, hoisting: None, top: &[], rows: HashSet::new(), fold_scope: None, turns: HashMap::new(), folds: HashMap::new(), image_sites: HashMap::new(), type_index: Default::default(),
     };
     // Two facts that always exist: what the surface really measures. The
     // render sets them when the compositor configures it.
@@ -800,6 +802,22 @@ pub fn compile<'a>(tree: &'a [Entry], files: &'a [String], dirs: &'a [std::path:
         for surf in o.e.surfaces.iter_mut().filter(|s| s.name == owner_name) {
             surf.anchor = start_anchor;
             surf.anchor_from = Some((h, anchors.clone()));
+        }
+    }
+    for (which, name, (l, col)) in std::mem::take(&mut o.pending_screens) {
+        let g = o.global(&name);
+        let Some(t) = o.texts.get(&g).copied() else {
+            let known: Vec<&String> = o.texts.keys().collect();
+            let hint = closest_match(&name, known.into_iter()).map_or(String::new(), |p| format!(" Did you mean '{p}'?"));
+            o.push_error(CompileError::at(l, col, format!("`screens:` takes `all`, `each`, monitors' names in quotes, or a text whose value is a monitor's name (`text on_screen = \"DP-1\"`, `screens: on_screen`): there is no text called '{name}'.{hint}")));
+            continue;
+        };
+        // The value it is born with says where it starts; empty, on none.
+        let first = o.e.texts[t.0 as usize].1.clone();
+        let owner_name = o.e.surfaces[which].name.clone();
+        for surf in o.e.surfaces.iter_mut().filter(|s| s.name == owner_name) {
+            surf.screens = Screens::Named(if first.is_empty() { Vec::new() } else { vec![first.clone()] });
+            surf.screens_from = Some(t);
         }
     }
     if o.e.surfaces.is_empty() {
@@ -4908,12 +4926,20 @@ impl<'a> Compiler<'a> {
                     let _ = c.num()?;
                 }
                 Screens::Number(0)
-            } else {
+            } else if matches!(c.peek(), Some(TokenKind::Str(_))) {
                 let mut v = vec![c.string()?];
                 while c.sym(",") {
                     v.push(c.string()?);
                 }
                 Screens::Named(v)
+            } else {
+                // A text fact whose value is the monitor's name: looked for at
+                // the end, as it may be declared further down.
+                let pos = c.pos();
+                let word = c.id("the monitors of a surface: `all`, `each`, names in quotes, or a text")?;
+                c.expect_end()?;
+                self.pending_screens.push((which, word, pos));
+                Screens::Named(Vec::new())
             };
         }
         if let Some((name, pos)) = pending_anchor {

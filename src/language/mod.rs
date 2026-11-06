@@ -432,6 +432,19 @@ mod tests {
     }
 
     #[test]
+    fn a_surface_can_take_its_monitor_from_a_text() {
+        let (scene, _) = super::read_file(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/screens-from-a-text.plm")).unwrap();
+        let main = &scene.surfaces[0];
+        assert_eq!(main.screens, crate::scene::Screens::Named(vec!["HDMI-A-1".into()]), "it starts where the text says");
+        let t = main.screens_from.expect("it follows the text");
+        assert_eq!(scene.texts[t.0 as usize].0, "on_screen");
+        // Declared further down, and empty: on no monitor until it says one.
+        let panel = scene.surfaces.iter().find(|s| s.name == "panel").unwrap();
+        assert_eq!(panel.screens, crate::scene::Screens::Named(Vec::new()));
+        assert!(panel.screens_from.is_some());
+    }
+
+    #[test]
     fn a_lock_screen_has_the_keyboard_whatever_the_first_surface_says() {
         let (scene, _) = super::read_file(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/lock-keyboard-own.plm")).unwrap();
         let lock = scene.surfaces.iter().find(|s| s.lock_screen).unwrap();

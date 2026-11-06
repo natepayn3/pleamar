@@ -1286,6 +1286,36 @@ impl State {
         }
     }
 
+    /// What the render asked to move (`rescreen`): each surface's layers off
+    /// the monitors it no longer names, and onto the one it does. The render
+    /// keeps its sheet's state, as for a monitor that comes back.
+    fn rescreen(&mut self, qh: &QueueHandle<State>) {
+        let asked = std::mem::take(&mut *RESCREENS.lock().unwrap());
+        if asked.is_empty() {
+            return;
+        }
+        for (which, screen) in asked {
+            let Some(s) = self.wanted.get_mut(which) else { continue };
+            let names = if screen.is_empty() { Vec::new() } else { vec![screen.clone()] };
+            if s.screens == Screens::Named(names.clone()) && self.placed.iter().any(|p| p.which == which) {
+                continue;
+            }
+            s.screens = Screens::Named(names);
+            let outputs = &self.outputs;
+            let leaves = |p: &Placed| p.which == which && matches!(p.role, Role::Layer(_)) && outputs.info(&p.output).and_then(|i| i.name).as_deref() != Some(screen.as_str());
+            for p in self.placed.iter().filter(|p| leaves(p)) {
+                let _ = self.to_render.send(ToRender::SheetGone(p.id));
+                if let Some(c) = MOVABLE_LAYERS.get() {
+                    c.placed.lock().unwrap().retain(|(_, layer, _, _, _)| layer.wl_surface() != p.role.wl());
+                }
+            }
+            self.placed.retain(|p| !leaves(p));
+            let here = self.outputs.outputs().any(|o| self.outputs.info(&o).and_then(|i| i.name).as_deref() == Some(screen.as_str()));
+            println!("wayland · surface {which} to {}", if screen.is_empty() { "no monitor".to_owned() } else if here { screen.clone() } else { format!("{screen}, which is not plugged in: on none until it is") });
+        }
+        self.place_on_all(qh, None);
+    }
+
     fn remove_from(&mut self, output: &wl_output::WlOutput) {
         OUTPUTS.lock().unwrap().retain(|_, o| o != output);
         if let Some(c) = LOCKS.get() {
@@ -1649,6 +1679,8 @@ fn placement(anchor: SurfaceAnchor, s: Stretch, asked: (u32, u32)) -> (Anchor, (
 /// Marea unable to choose a corner while recording.
 struct MovableLayers {
     connection: Connection,
+    /// For a round trip that wakes the event loop (`rescreen`).
+    qh: QueueHandle<State>,
     placed: Mutex<Vec<(usize, LayerSurface, [i32; 4], Stretch, Arc<BackdropTarget>)>>,
     /// What the render last said of each surface while running —its room, its edge, its level—: a copy placed
     /// afterwards (a monitor that comes, or one whose number changed) is born with it. The render says each only
@@ -1669,6 +1701,27 @@ fn said_of(which: usize) -> Said {
     MOVABLE_LAYERS.get().and_then(|c| c.said.lock().unwrap().get(&which).copied()).unwrap_or_default()
 }
 static MOVABLE_LAYERS: std::sync::OnceLock<MovableLayers> = std::sync::OnceLock::new();
+/// Surfaces the render asked to go to another monitor (`rescreen`), for the
+/// event loop: it owns what each surface wants and what is placed.
+static RESCREENS: Mutex<Vec<(usize, String)>> = Mutex::new(Vec::new());
+
+/// Surface `which` to monitor `screen` (empty: none). Said to the event loop
+/// with a round trip of its own, which wakes it.
+pub fn rescreen(which: usize, screen: &str) {
+    let Some(c) = MOVABLE_LAYERS.get() else { return };
+    RESCREENS.lock().unwrap().push((which, screen.to_owned()));
+    c.connection.display().sync(&c.qh, Rescreen);
+    let _ = c.connection.flush();
+}
+
+struct Rescreen;
+impl Dispatch2<wayland_client::protocol::wl_callback::WlCallback, State> for Rescreen {
+    fn event(&self, e: &mut State, _: &wayland_client::protocol::wl_callback::WlCallback, ev: wayland_client::protocol::wl_callback::Event, _: &Connection, qh: &QueueHandle<State>) {
+        if let wayland_client::protocol::wl_callback::Event::Done { .. } = ev {
+            e.rescreen(qh);
+        }
+    }
+}
 static LAYERS_PLACED: AtomicU64 = AtomicU64::new(0);
 
 /// How many layers have been put on a monitor so far (see `platform::layers_placed`).
@@ -1976,7 +2029,7 @@ pub fn run_event_loop(wanted: Vec<Surface>, extra_height: u32, instance: wgpu::I
     };
     match XdgShell::bind(&globals, &qh) {
         Ok(xdg) => {
-            let _ = MOVABLE_LAYERS.set(MovableLayers { connection: connection.clone(), placed: Mutex::default(), said: Mutex::default() });
+            let _ = MOVABLE_LAYERS.set(MovableLayers { connection: connection.clone(), qh: qh.clone(), placed: Mutex::default(), said: Mutex::default() });
             let _ = POPUPS.set(Popups {
                 qh: qh.clone(),
                 compositor: state.compositor.clone(),

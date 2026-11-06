@@ -1,0 +1,10 @@
+language 0.7
+
+// `screens:` from a text: the surface goes to the monitor the text names, while it runs.
+scene ScreensFromAText {
+    text on_screen = "HDMI-A-1"
+    surface { size: 200, 40; screens: on_screen }
+    surface panel { size: 100, 40; screens: nowhere }
+    text nowhere = ""
+    box { from: 0, 0; size: 200, 40; color: #203040 }
+}

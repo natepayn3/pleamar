@@ -636,6 +636,8 @@ pub fn run(
     // while its `while` holds. 0 is the monitor's.
     let mut rate_now: u32 = 0;
     let mut anchors_set: Vec<crate::scene::SurfaceAnchor> = Vec::new();
+    // Which monitor each surface whose `screens:` is a text fact was last sent to.
+    let mut screens_set: Vec<Option<String>> = Vec::new();
     let mut layers_seen: u64 = 0;
     // The "this does not compile" banner, and the good scene with it on top.
     let mut warning: Option<Vec<Instr>> = None;
@@ -4730,6 +4732,22 @@ pub fn run(
             if reserves_set[k] != wants {
                 reserves_set[k] = wants;
                 crate::platform::rezone(k, wants);
+            }
+        }
+        // And the monitor, from a text fact (`screens: on_screen`): the surface
+        // goes there and the scene stays as it is.
+        if screens_set.len() != scene.surfaces.len() {
+            screens_set = scene.surfaces.iter().map(|s| match &s.screens {
+                crate::scene::Screens::Named(v) if s.screens_from.is_some() => Some(v.first().cloned().unwrap_or_default()),
+                _ => None,
+            }).collect();
+        }
+        for (k, sup) in scene.surfaces.iter().enumerate() {
+            let Some(t) = sup.screens_from else { continue };
+            let wants = texts.get(t.0 as usize).map(|v| v.trim()).unwrap_or("");
+            if screens_set[k].as_deref() != Some(wants) {
+                screens_set[k] = Some(wants.to_owned());
+                crate::platform::rescreen(k, wants);
             }
         }
         for (k, sup) in scene.surfaces.iter().enumerate() {

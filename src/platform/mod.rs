@@ -434,6 +434,20 @@ pub fn reshape(which: usize, surface: &crate::scene::Surface) {
     let _ = (which, surface);
 }
 
+/// Puts surface `which` on another monitor while running (`screens:` from a
+/// text fact), keeping the scene as it is; an empty name, on none. On Wayland
+/// its layer goes and a new one is made on that monitor, as when a monitor
+/// comes back. A platform that places surfaces itself (pleamar-wm's own
+/// scenes) decides where they are, and is not asked.
+pub fn rescreen(which: usize, screen: &str) {
+    if LAYER_HOOKS.get().is_some() {
+        return;
+    }
+    #[cfg(target_os = "linux")]
+    wayland::rescreen(which, screen);
+    let _ = (which, screen);
+}
+
 pub fn reanchor(which: usize, anchor: crate::scene::SurfaceAnchor) {
     if let Some(h) = LAYER_HOOKS.get() {
         return (h.reanchor)(which, anchor);
