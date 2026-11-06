@@ -1,6 +1,6 @@
 [package]
 name = "pleamar"
-version = "0.7.20"
+version = "0.7.21"
 edition = "2024"
 license = "BSD-3-Clause"
 description = "A desktop shell language and runtime where animation does not depend on logic"
