@@ -4059,7 +4059,7 @@ impl Gpu {
             && std::env::var_os("PLEAMAR_SWAPCHAIN").is_none()
             && (!intel || std::env::var_os("PLEAMAR_OWN_FRAMES").is_some());
         if intel && !ours && std::env::var_os("PLEAMAR_SWAPCHAIN").is_none() && !INTEL_SAID.swap(true, std::sync::atomic::Ordering::Relaxed) {
-            println!("render · an Intel card: the system's swapchain, not frames of our own (they came out dotted there, #132); PLEAMAR_OWN_FRAMES=1 tries them");
+            println!("render · an Intel card: the system's swapchain, not frames of our own (they came out dotted there, #132); PLEAMAR_OWN_FRAMES=1 tries them, and PLEAMAR_OWN_FRAMES_LINEAR=1 with them in the plain layout");
         }
         if ours
             && matches!(l.target, Target::Surface(_))

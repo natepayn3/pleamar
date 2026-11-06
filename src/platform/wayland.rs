@@ -214,7 +214,16 @@ impl OwnFrames {
 
     fn make(&mut self, device: &wgpu::Device) -> Result<(), String> {
         let d = DMABUFS.get().ok_or("the compositor takes no frames on the card")?;
-        let layouts = ARGB_LAYOUTS.lock().unwrap().clone();
+        let mut layouts = ARGB_LAYOUTS.lock().unwrap().clone();
+        // `PLEAMAR_OWN_FRAMES_LINEAR=1`: only the plain layout, rows one after
+        // another, which every card and compositor read alike. To find out
+        // whether the dots on Intel (#132) come from a tiled layout.
+        if std::env::var_os("PLEAMAR_OWN_FRAMES_LINEAR").is_some() {
+            if !layouts.is_empty() && !layouts.contains(&0) {
+                return Err("PLEAMAR_OWN_FRAMES_LINEAR asks for the plain layout, and the compositor does not offer it".into());
+            }
+            layouts = vec![0];
+        }
         let mut modifier = 0;
         for _ in 0..OWN_FRAMES {
             let e = crate::dmabuf::export(device, self.px, &layouts)?;
