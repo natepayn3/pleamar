@@ -2084,7 +2084,8 @@ pub fn run(
             // in a window manager no window could be typed into.
             if let Some(ed) = editing.as_mut().filter(|e| draw.fields.iter().any(|f| f.text == e.field && !f.passive)) {
                 let k = ed.field;
-                match ed.handle_key(&mut texts[k], &name, typed.as_deref(), mods) {
+                let secret = draw.fields.iter().any(|f| f.text == k && f.secret);
+                match ed.handle_key(&mut texts[k], &name, typed.as_deref(), mods, secret) {
                     KeyOutcome::Changed => {
                         last_key = Instant::now();
                         let _ = to_logic.send(Event::Text(scene.texts[k].0, texts[k].clone()));
@@ -2410,9 +2411,10 @@ pub fn run(
                             // or «png»), as on a text that can be selected; a third takes all of it.
                             let again = now.duration_since(clicks.0) < Duration::from_millis(450) && (p.0 - clicks.1 .0).hypot(p.1 - clicks.1 .1) < 5.0;
                             clicks = (now, p, if again { clicks.2 % 3 + 1 } else { 1 });
+                            // (A secret one is a single word: where its words break would say what it hides.)
                             let (anchor, cursor) = match clicks.2 {
                                 1 => (b, b),
-                                2 => word_around(&texts[placed.text], b),
+                                2 if !placed.secret => word_around(&texts[placed.text], b),
                                 _ => (0, texts[placed.text].len()),
                             };
                             editing = Some(Editing { field: placed.text, cursor, anchor });
@@ -5945,7 +5947,11 @@ impl Editing {
         b > a
     }
 
-    fn handle_key(&mut self, t: &mut String, name: &str, typed: Option<&str>, m: Mods) -> KeyOutcome {
+    /// `secret`: a field whose letters are hidden is one word, for Ctrl and its
+    /// arrows and deletes, so that where they stop says nothing of what it holds.
+    fn handle_key(&mut self, t: &mut String, name: &str, typed: Option<&str>, m: Mods, secret: bool) -> KeyOutcome {
+        let word_left = |t: &str, b: usize| if secret { 0 } else { word_left(t, b) };
+        let word_right = |t: &str, b: usize| if secret { t.len() } else { word_right(t, b) };
         self.cursor = self.cursor.min(t.len());
         self.anchor = self.anchor.min(t.len());
         let before = |t: &str, b: usize| t[..b].char_indices().next_back().map_or(0, |c| c.0);
@@ -6930,12 +6936,17 @@ mod selection_tests {
         assert_eq!(word_right(t, 5), t.len());
         let mut e = Editing { field: 0, cursor: 9, anchor: 9 };
         let mut s = String::from(t);
-        e.handle_key(&mut s, "BackSpace", None, Mods { ctrl: true, ..Mods::default() });
+        e.handle_key(&mut s, "BackSpace", None, Mods { ctrl: true, ..Mods::default() }, false);
         assert_eq!(s, "cat 1.");
         e.cursor = 0;
         e.anchor = 0;
-        e.handle_key(&mut s, "Delete", None, Mods { ctrl: true, ..Mods::default() });
+        e.handle_key(&mut s, "Delete", None, Mods { ctrl: true, ..Mods::default() }, false);
         assert_eq!(s, " 1.");
+        // A secret field is one word: Ctrl+Backspace takes all of it before the cursor.
+        let mut e = Editing { field: 0, cursor: 9, anchor: 9 };
+        let mut s = String::from("my.pass 1");
+        e.handle_key(&mut s, "BackSpace", None, Mods { ctrl: true, ..Mods::default() }, true);
+        assert_eq!(s, "");
     }
 
     #[test]
