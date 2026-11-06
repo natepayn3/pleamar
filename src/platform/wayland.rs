@@ -1305,6 +1305,7 @@ impl State {
             let leaves = |p: &Placed| p.which == which && matches!(p.role, Role::Layer(_)) && !outputs.info(&p.output).and_then(|i| i.name).is_some_and(|n| names.contains(&n));
             for p in self.placed.iter().filter(|p| leaves(p)) {
                 let _ = self.to_render.send(ToRender::SheetGone(p.id));
+                forget_parent(p.role.wl());
                 if let Some(c) = MOVABLE_LAYERS.get() {
                     c.placed.lock().unwrap().retain(|(_, layer, _, _, _)| layer.wl_surface() != p.role.wl());
                 }
@@ -1333,6 +1334,7 @@ impl State {
         }
         for p in self.placed.iter().filter(|p| &p.output == output) {
             let _ = self.to_render.send(ToRender::SheetGone(p.id));
+            forget_parent(p.role.wl());
             if let Some(c) = MOVABLE_LAYERS.get() {
                 c.placed.lock().unwrap().retain(|(_, layer, _, _, _)| layer.wl_surface() != p.role.wl());
             }
@@ -1844,6 +1846,18 @@ pub fn reshape(which: usize, p: &crate::scene::Surface) {
 
 static POPUPS: std::sync::OnceLock<Popups> = std::sync::OnceLock::new();
 
+/// A layer that goes (to another monitor, or with its monitor) must not stay
+/// the popups' parent: that copy would keep it alive, mapped, with its last
+/// frame still on the monitor it left.
+fn forget_parent(wl: &wl_surface::WlSurface) {
+    if let Some(pp) = POPUPS.get() {
+        let mut parent = pp.parent.lock().unwrap();
+        if parent.as_ref().is_some_and(|p| p.layer.wl_surface() == wl) {
+            *parent = None;
+        }
+    }
+}
+
 pub fn popup(k: usize, what: Option<([i32; 4], (f32, f32))>) {
     let Some(e) = POPUPS.get() else { return };
     let Some(([x, y, w, h], origin)) = what else {
@@ -2096,6 +2110,7 @@ impl State {
         if let Some(p) = self.placed.iter().find(|p| p.role.wl() == wl) {
             let _ = self.to_render.send(ToRender::SheetGone(p.id));
         }
+        forget_parent(wl);
         self.placed.retain(|p| p.role.wl() != wl);
         if let Some(c) = MOVABLE_LAYERS.get() {
             c.placed.lock().unwrap().retain(|(_, layer, _, _, _)| layer.wl_surface() != wl);
