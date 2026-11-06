@@ -2406,7 +2406,16 @@ pub fn run(
                             let b = placed.layout.as_ref().map_or(0, |m| m.byte_at_x(local.0 - placed.x0 + placed.scroll));
                             let b = if placed.secret { crate::gpu::unmasked_byte(&texts[placed.text], b) } else { b };
                             let b = b.min(texts[placed.text].len());
-                            editing = Some(Editing { field: placed.text, cursor: b, anchor: b });
+                            // A second click in a row takes the word it lands on (in «cat.png», «cat»
+                            // or «png»), as on a text that can be selected; a third takes all of it.
+                            let again = now.duration_since(clicks.0) < Duration::from_millis(450) && (p.0 - clicks.1 .0).hypot(p.1 - clicks.1 .1) < 5.0;
+                            clicks = (now, p, if again { clicks.2 % 3 + 1 } else { 1 });
+                            let (anchor, cursor) = match clicks.2 {
+                                1 => (b, b),
+                                2 => word_around(&texts[placed.text], b),
+                                _ => (0, texts[placed.text].len()),
+                            };
+                            editing = Some(Editing { field: placed.text, cursor, anchor });
                             last_key = now;
                         }
                         drag = Some((k, p, now));
@@ -5875,6 +5884,39 @@ fn word_around(t: &str, b: usize) -> (usize, usize) {
     (start, end)
 }
 
+/// Where Ctrl+Left goes from `b` (and what Ctrl+Backspace takes): back over what
+/// is not a word, then over the word before it.
+fn word_left(t: &str, b: usize) -> usize {
+    let is_word = |c: char| c.is_alphanumeric() || c == '_' || c == '\'' || c == '’';
+    let mut k = b.min(t.len());
+    let mut seen_word = false;
+    for (i, c) in t[..k].char_indices().rev() {
+        if is_word(c) {
+            seen_word = true;
+        } else if seen_word {
+            break;
+        }
+        k = i;
+    }
+    k
+}
+
+/// Where Ctrl+Right goes from `b` (and what Ctrl+Delete takes): on over what is
+/// not a word, then to the end of the word after it.
+fn word_right(t: &str, b: usize) -> usize {
+    let is_word = |c: char| c.is_alphanumeric() || c == '_' || c == '\'' || c == '’';
+    let b = b.min(t.len());
+    let mut seen_word = false;
+    for (i, c) in t[b..].char_indices() {
+        if is_word(c) {
+            seen_word = true;
+        } else if seen_word {
+            return b + i;
+        }
+    }
+    t.len()
+}
+
 /// The field being typed into: which text, where the cursor is and from where it was
 /// selected. In bytes, always on the boundary of a letter.
 struct Editing {
@@ -5953,6 +5995,24 @@ impl Editing {
                 self.cursor += pasted.len();
                 self.anchor = self.cursor;
                 KeyOutcome::Changed
+            }
+            // With Ctrl, a word at a time (as in any text box).
+            "BackSpace" | "Delete" if m.ctrl => {
+                if !self.delete_selection(t) {
+                    let (a, b) = if name == "BackSpace" { (word_left(t, self.cursor), self.cursor) } else { (self.cursor, word_right(t, self.cursor)) };
+                    t.replace_range(a..b, "");
+                    self.cursor = a;
+                    self.anchor = a;
+                }
+                KeyOutcome::Changed
+            }
+            "Left" if m.ctrl => {
+                let a = word_left(t, self.cursor);
+                move_to(self, a)
+            }
+            "Right" if m.ctrl => {
+                let a = word_right(t, self.cursor);
+                move_to(self, a)
             }
             "BackSpace" | "Delete" => {
                 if !self.delete_selection(t) {
@@ -6852,6 +6912,31 @@ mod follows_tests {
 #[cfg(test)]
 mod selection_tests {
     use super::*;
+
+    #[test]
+    fn a_double_click_in_a_field_takes_the_word() {
+        assert_eq!(word_around("cat.png", 1), (0, 3));
+        assert_eq!(word_around("cat.png", 5), (4, 7));
+    }
+
+    #[test]
+    fn ctrl_moves_and_deletes_a_word_at_a_time() {
+        let t = "cat 1.png";
+        assert_eq!(word_left(t, t.len()), 6);
+        assert_eq!(word_left(t, 6), 4);
+        assert_eq!(word_left(t, 4), 0);
+        assert_eq!(word_right(t, 0), 3);
+        assert_eq!(word_right(t, 3), 5);
+        assert_eq!(word_right(t, 5), t.len());
+        let mut e = Editing { field: 0, cursor: 9, anchor: 9 };
+        let mut s = String::from(t);
+        e.handle_key(&mut s, "BackSpace", None, Mods { ctrl: true, ..Mods::default() });
+        assert_eq!(s, "cat 1.");
+        e.cursor = 0;
+        e.anchor = 0;
+        e.handle_key(&mut s, "Delete", None, Mods { ctrl: true, ..Mods::default() });
+        assert_eq!(s, " 1.");
+    }
 
     #[test]
     fn a_double_click_takes_the_word() {
