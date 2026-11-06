@@ -1296,13 +1296,13 @@ impl State {
         }
         for (which, screen) in asked {
             let Some(s) = self.wanted.get_mut(which) else { continue };
-            let names = if screen.is_empty() { Vec::new() } else { vec![screen.clone()] };
+            let names = crate::scene::monitor_names(&screen);
             if s.screens == Screens::Named(names.clone()) && self.placed.iter().any(|p| p.which == which) {
                 continue;
             }
-            s.screens = Screens::Named(names);
+            s.screens = Screens::Named(names.clone());
             let outputs = &self.outputs;
-            let leaves = |p: &Placed| p.which == which && matches!(p.role, Role::Layer(_)) && outputs.info(&p.output).and_then(|i| i.name).as_deref() != Some(screen.as_str());
+            let leaves = |p: &Placed| p.which == which && matches!(p.role, Role::Layer(_)) && !outputs.info(&p.output).and_then(|i| i.name).is_some_and(|n| names.contains(&n));
             for p in self.placed.iter().filter(|p| leaves(p)) {
                 let _ = self.to_render.send(ToRender::SheetGone(p.id));
                 if let Some(c) = MOVABLE_LAYERS.get() {
@@ -1310,8 +1310,15 @@ impl State {
                 }
             }
             self.placed.retain(|p| !leaves(p));
-            let here = self.outputs.outputs().any(|o| self.outputs.info(&o).and_then(|i| i.name).as_deref() == Some(screen.as_str()));
-            println!("wayland · surface {which} to {}", if screen.is_empty() { "no monitor".to_owned() } else if here { screen.clone() } else { format!("{screen}, which is not plugged in: on none until it is") });
+            let here: Vec<String> = self.outputs.outputs().filter_map(|o| self.outputs.info(&o).and_then(|i| i.name)).collect();
+            let away: Vec<&String> = names.iter().filter(|n| !here.contains(n)).collect();
+            let said = if names.is_empty() { "no monitor".to_owned() } else { screen.clone() };
+            if away.is_empty() {
+                println!("wayland · surface {which} to {said}");
+            } else {
+                let away: Vec<&str> = away.iter().map(|n| n.as_str()).collect();
+                println!("wayland · surface {which} to {said} ({} not plugged in: there once it is)", away.join(", "));
+            }
         }
         self.place_on_all(qh, None);
     }

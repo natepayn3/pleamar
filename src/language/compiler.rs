@@ -809,14 +809,14 @@ pub fn compile<'a>(tree: &'a [Entry], files: &'a [String], dirs: &'a [std::path:
         let Some(t) = o.texts.get(&g).copied() else {
             let known: Vec<&String> = o.texts.keys().collect();
             let hint = closest_match(&name, known.into_iter()).map_or(String::new(), |p| format!(" Did you mean '{p}'?"));
-            o.push_error(CompileError::at(l, col, format!("`screens:` takes `all`, `each`, monitors' names in quotes, or a text whose value is a monitor's name (`text on_screen = \"DP-1\"`, `screens: on_screen`): there is no text called '{name}'.{hint}")));
+            o.push_error(CompileError::at(l, col, format!("`screens:` takes `all`, `each`, monitors' names in quotes, or a text whose value names the monitors (`text on_screen = \"DP-1\"` or `\"DP-1, HDMI-A-1\"`, `screens: on_screen`): there is no text called '{name}'.{hint}")));
             continue;
         };
         // The value it is born with says where it starts; empty, on none.
         let first = o.e.texts[t.0 as usize].1.clone();
         let owner_name = o.e.surfaces[which].name.clone();
         for surf in o.e.surfaces.iter_mut().filter(|s| s.name == owner_name) {
-            surf.screens = Screens::Named(if first.is_empty() { Vec::new() } else { vec![first.clone()] });
+            surf.screens = Screens::Named(crate::scene::monitor_names(&first));
             surf.screens_from = Some(t);
         }
     }

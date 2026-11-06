@@ -88,6 +88,12 @@ pub enum Level {
     Overlay,
 }
 
+/// The monitors a text names for `screens:` (`"DP-1, HDMI-A-1"`): split at
+/// commas, each name trimmed; an empty text names none.
+pub fn monitor_names(text: &str) -> Vec<String> {
+    text.split(',').map(str::trim).filter(|n| !n.is_empty()).map(str::to_owned).collect()
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Screens {
     /// One surface on each monitor, and on the ones plugged in later.

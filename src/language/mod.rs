@@ -442,6 +442,9 @@ mod tests {
         let panel = scene.surfaces.iter().find(|s| s.name == "panel").unwrap();
         assert_eq!(panel.screens, crate::scene::Screens::Named(Vec::new()));
         assert!(panel.screens_from.is_some());
+        // Several, split at commas.
+        let both = scene.surfaces.iter().find(|s| s.name == "both").unwrap();
+        assert_eq!(both.screens, crate::scene::Screens::Named(vec!["DP-1".into(), "HDMI-A-1".into()]));
     }
 
     #[test]

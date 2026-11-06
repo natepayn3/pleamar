@@ -4734,20 +4734,21 @@ pub fn run(
                 crate::platform::rezone(k, wants);
             }
         }
-        // And the monitor, from a text fact (`screens: on_screen`): the surface
-        // goes there and the scene stays as it is.
+        // And the monitors, from a text (`screens: on_screen`, its value
+        // `"DP-1"` or `"DP-1, HDMI-A-1"`): the surface goes there and the scene
+        // stays as it is.
         if screens_set.len() != scene.surfaces.len() {
             screens_set = scene.surfaces.iter().map(|s| match &s.screens {
-                crate::scene::Screens::Named(v) if s.screens_from.is_some() => Some(v.first().cloned().unwrap_or_default()),
+                crate::scene::Screens::Named(v) if s.screens_from.is_some() => Some(v.join(", ")),
                 _ => None,
             }).collect();
         }
         for (k, sup) in scene.surfaces.iter().enumerate() {
             let Some(t) = sup.screens_from else { continue };
-            let wants = texts.get(t.0 as usize).map(|v| v.trim()).unwrap_or("");
-            if screens_set[k].as_deref() != Some(wants) {
-                screens_set[k] = Some(wants.to_owned());
-                crate::platform::rescreen(k, wants);
+            let wants = crate::scene::monitor_names(texts.get(t.0 as usize).map(String::as_str).unwrap_or("")).join(", ");
+            if screens_set[k].as_deref() != Some(wants.as_str()) {
+                crate::platform::rescreen(k, &wants);
+                screens_set[k] = Some(wants);
             }
         }
         for (k, sup) in scene.surfaces.iter().enumerate() {
