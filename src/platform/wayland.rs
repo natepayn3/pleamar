@@ -475,6 +475,40 @@ static OUTPUTS: std::sync::LazyLock<Mutex<std::collections::HashMap<String, wl_o
 /// return), a monitor can be gone in the compositor before this side has heard
 /// so, and photographing it then is a fatal protocol error: no backdrop is
 /// photographed until they have been still for a moment.
+/// How each monitor stands (wl_output's transform, 0 to 7), by its handle: a
+/// capture comes as the monitor's buffer is, not as it is seen, and on a
+/// monitor turned on its side it has to be stood upright (`upright`).
+static TURNS: std::sync::LazyLock<Mutex<std::collections::HashMap<wayland_client::backend::ObjectId, u8>>> = std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+
+/// A capture of a monitor that stands turned (`turn`, wl_output's transform),
+/// stood upright as it is seen: what the compositor shows of that buffer.
+/// pleamar-wm hands its pictures already upright; Hyprland and others hand
+/// the buffer as it is.
+fn upright(src: &[u8], (w, h, stride): (u32, u32, u32), turn: u8) -> (Vec<u8>, u32, u32) {
+    let (w, h, stride) = (w as usize, h as usize, stride as usize);
+    let (dw, dh) = if turn % 2 == 1 { (h, w) } else { (w, h) };
+    let mut out = vec![0u8; dw * dh * 4];
+    for y in 0..h {
+        for x in 0..w {
+            let (dx, dy) = match turn {
+                1 => (h - 1 - y, x),
+                2 => (w - 1 - x, h - 1 - y),
+                3 => (y, w - 1 - x),
+                4 => (w - 1 - x, y),
+                5 => (h - 1 - y, w - 1 - x),
+                6 => (x, h - 1 - y),
+                7 => (y, x),
+                _ => (x, y),
+            };
+            let (a, b) = (y * stride + x * 4, (dy * dw + dx) * 4);
+            if a + 4 <= src.len() {
+                out[b..b + 4].copy_from_slice(&src[a..a + 4]);
+            }
+        }
+    }
+    (out, dw as u32, dh as u32)
+}
+
 static OUTPUTS_CHANGED: std::sync::LazyLock<Mutex<Option<std::time::Instant>>> = std::sync::LazyLock::new(|| Mutex::new(None));
 const OUTPUTS_SETTLE: std::time::Duration = std::time::Duration::from_millis(1500);
 
@@ -521,6 +555,11 @@ struct CaptureFor {
     part: Option<(Arc<Mutex<Parts>>, usize)>,
     /// What it offers to copy into on the card: format and size.
     dmabuf: Mutex<Option<(u32, u32, u32)>>,
+    /// How its monitor stands (wl_output's transform) and the box asked for:
+    /// on a monitor on its side, a picture that comes with its width and height
+    /// the other way round from the box comes turned, and is stood upright here.
+    turn: u8,
+    asked: (i32, i32),
     /// The buffer on the card it was asked to copy into.
     on_card: Mutex<Option<Arc<super::CardBackdrop>>>,
     /// The compositor says the picture is of what is behind our surface, without it (pleamar-wm's
@@ -702,6 +741,15 @@ impl Dispatch2<ZwlrScreencopyFrameV1, State> for CaptureFor {
                     if let Some(card) = self.on_card.lock().unwrap().take() {
                         let _ = e.to_render.send(ToRender::Backdrop(Box::new(super::Backdrop { sheet: id, width: card.size.0, height: card.size.1, stride: 0, opacity, data: None, rects: Vec::new(), card: Some(card), offer: None })));
                     } else if let Some(f) = e.capture_buffers.get(&(id, 0)) {
+                        // (pleamar-wm hands them upright already: then they come the right way round.)
+                        let turned = self.turn % 2 == 1 && self.asked.0 != self.asked.1 && (f.size.0 > f.size.1) != (self.asked.0 > self.asked.1);
+                        if turned {
+                            // Its monitor stands turned: upright, as it is seen.
+                            let (px, w, h) = upright((*f.map).as_ref(), (f.size.0, f.size.1, f.size.2), self.turn);
+                            let data: Arc<dyn AsRef<[u8]> + Send + Sync> = Arc::new(px);
+                            let _ = e.to_render.send(ToRender::Backdrop(Box::new(super::Backdrop { sheet: id, width: w, height: h, stride: w * 4, opacity, data: Some(data), rects: Vec::new(), card: None, offer: None })));
+                            return self.finish();
+                        }
                         let data: Arc<dyn AsRef<[u8]> + Send + Sync> = f.map.clone();
                         // The compositor could have written on the card and nothing there was ready: the render is told.
                         let offer = (*self.dmabuf.lock().unwrap()).filter(|_| super::card_backdrops_allowed() && !super::card_refused(id));
@@ -950,14 +998,16 @@ impl PlatformWindow for WaylandWindow {
             }
             // A glass whose captures go onto the card is captured whole: the compositor copies it card to card,
             // and the parts are only worth it when the processor reads them back.
+            // On a monitor that stands turned the picture comes turned: whole, and through the processor, which stands it upright.
+            let turn = TURNS.lock().unwrap().get(&output.id()).copied().unwrap_or(0);
             let on_card = CARD_OFFERED.load(Ordering::Relaxed) && DMABUFS.get().is_some() && super::card_backdrops_allowed() && !super::card_refused(d.id);
-            if rects.len() >= 2 && !PARTS_BROKEN.load(Ordering::Relaxed) && !on_card {
+            if rects.len() >= 2 && !PARTS_BROKEN.load(Ordering::Relaxed) && !on_card && turn % 2 == 0 {
                 let parts = Arc::new(Mutex::new(Parts { hull: bounds, rects: rects.clone(), valid: Vec::new(), over: false }));
                 for (k, r) in rects.iter().enumerate() {
-                    frames.push(manager.capture_output_region(0, &output, x + r[0], y + r[1], r[2], r[3], &qh, CaptureFor { target: d.clone(), on_change, format: Mutex::new(None), part: Some((parts.clone(), k)), dmabuf: Mutex::new(None), on_card: Mutex::new(None), without_us: std::sync::atomic::AtomicBool::new(false) }));
+                    frames.push(manager.capture_output_region(0, &output, x + r[0], y + r[1], r[2], r[3], &qh, CaptureFor { asked: (r[2], r[3]), target: d.clone(), on_change, format: Mutex::new(None), part: Some((parts.clone(), k)), dmabuf: Mutex::new(None), on_card: Mutex::new(None), without_us: std::sync::atomic::AtomicBool::new(false), turn }));
                 }
             } else {
-                frames.push(manager.capture_output_region(0, &output, x + bounds[0], y + bounds[1], bounds[2], bounds[3], &qh, CaptureFor { target: d.clone(), on_change, format: Mutex::new(None), part: None, dmabuf: Mutex::new(None), on_card: Mutex::new(None), without_us: std::sync::atomic::AtomicBool::new(false) }));
+                frames.push(manager.capture_output_region(0, &output, x + bounds[0], y + bounds[1], bounds[2], bounds[3], &qh, CaptureFor { asked: (bounds[2], bounds[3]), target: d.clone(), on_change, format: Mutex::new(None), part: None, dmabuf: Mutex::new(None), on_card: Mutex::new(None), without_us: std::sync::atomic::AtomicBool::new(false), turn }));
             }
         };
         // With frames of its own, after the frame just handed over, from the thread that hands
@@ -2130,6 +2180,21 @@ pub fn run_event_loop(wanted: Vec<Surface>, extra_height: u32, instance: wgpu::I
 }
 
 impl State {
+    /// How a monitor stands, for its captures (`TURNS`).
+    fn note_turn(&self, output: &wl_output::WlOutput) {
+        let turn = self.outputs.info(output).map_or(0, |i| match i.transform {
+            wl_output::Transform::_90 => 1,
+            wl_output::Transform::_180 => 2,
+            wl_output::Transform::_270 => 3,
+            wl_output::Transform::Flipped => 4,
+            wl_output::Transform::Flipped90 => 5,
+            wl_output::Transform::Flipped180 => 6,
+            wl_output::Transform::Flipped270 => 7,
+            _ => 0,
+        });
+        TURNS.lock().unwrap().insert(output.id(), turn);
+    }
+
     /// A surface was closed: its monitor left, or someone closed the window.
     fn surface_gone(&mut self, wl: &wl_surface::WlSurface) {
         if let Some(p) = self.placed.iter().find(|p| p.role.wl() == wl) {
@@ -2672,6 +2737,7 @@ impl OutputHandler for State {
     }
     /// A monitor plugged in with the program running.
     fn new_output(&mut self, _: &Connection, qh: &QueueHandle<Self>, output: wl_output::WlOutput) {
+        self.note_turn(&output);
         outputs_changed(&self.to_render);
         if !self.announced.contains(&output) {
             self.announced.push(output.clone());
@@ -2687,6 +2753,7 @@ impl OutputHandler for State {
     /// edge (see `placement`), and the compositor keeps that size: after a new mode it was still the old one, and the surface stayed as it was
     /// until the program was started again. Ask again with the new size; the compositor answers with a configure, and `configured` resizes the sheet.
     fn update_output(&mut self, _: &Connection, qh: &QueueHandle<Self>, output: wl_output::WlOutput) {
+        self.note_turn(&output);
         self.place_on(&output, qh);
         let Some((w, h)) = self.outputs.info(&output).and_then(|i| i.logical_size) else { return };
         let Some(c) = MOVABLE_LAYERS.get() else { return };
