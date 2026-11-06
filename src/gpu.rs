@@ -2888,7 +2888,12 @@ impl DrawList {
                     let value = if *secret { dots.as_str() } else { real };
                     // When empty, it shows what is expected of it, fainter.
                     let placeholder = content_text(placeholder, c, texts);
-                    let m = tip.layout(idx, LayoutKey::new(if empty { &placeholder } else { value }, style, None));
+                    let key = LayoutKey::new(if empty { &placeholder } else { value }, style, None);
+                    let key = match style.family_from {
+                        Some(t) => key.familied(texts.get(t.0 as usize).map(|f| f.trim()).filter(|f| !f.is_empty()).map(crate::scene::intern)),
+                        None => key,
+                    };
+                    let m = tip.layout(idx, key);
                     let (x0, y0, w) = (at.0.eval(c), at.1.eval(c), width.eval(c));
                     let h = style.px * style.line_height;
                     let mine = field.filter(|v| v.text == k);
@@ -2965,6 +2970,11 @@ impl DrawList {
                     // pixels: a size that glides does not shape a new layout each frame).
                     let key = match &style.size {
                         Some(e) => key.sized((e.eval(c) * 4.0).round().max(4.0) / 4.0),
+                        None => key,
+                    };
+                    // A family from a text (`family: face`), as it says now.
+                    let key = match style.family_from {
+                        Some(t) => key.familied(texts.get(t.0 as usize).map(|f| f.trim()).filter(|f| !f.is_empty()).map(crate::scene::intern)),
                         None => key,
                     };
                     let key = match &style.weight_of {

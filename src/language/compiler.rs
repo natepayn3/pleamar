@@ -1285,6 +1285,35 @@ impl<'a> Compiler<'a> {
         }
     }
 
+    /// A text's `family:`: its name in quotes, a component's argument, or a
+    /// text whose value is the name (`text face = "Inter"`, `family: face`),
+    /// followed while the scene runs.
+    fn family(&mut self, c: &mut Cur) -> R<(Option<&'static str>, Option<TextId>)> {
+        let found = match c.peek() {
+            Some(TokenKind::Str(_)) => return Ok((Some(interned(&c.string()?)), None)),
+            Some(TokenKind::Id(name)) => {
+                let name = name.clone();
+                c.i += 1;
+                if let Some(s) = self.scopes.iter().rev().find_map(|e| e.strings.get(&name)) {
+                    (Some(interned(s)), None)
+                } else if let Some(k) = self.scopes.iter().rev().find_map(|e| e.contents.get(&name)) {
+                    match k {
+                        Content::Literal(s) => (Some(interned(s)), None),
+                        Content::Live(t) => (None, Some(*t)),
+                        _ => return c.error("a family is a name in quotes or a text: `family: \"Inter\"`, or `text face = \"Inter\"` and `family: face`"),
+                    }
+                } else if let Some(t) = self.texts.get(&self.global(&name)) {
+                    (None, Some(*t))
+                } else {
+                    return self.unknown(c, "no text", &name, self.texts.keys().collect());
+                }
+            }
+            _ => return c.error("a family is a name in quotes or a text: `family: \"Inter\"`, or `text face = \"Inter\"` and `family: face`"),
+        };
+        c.expect_end()?;
+        Ok(found)
+    }
+
     fn unknown<T>(&self, c: &Cur, what: &str, name: &str, known: Vec<&String>) -> R<T> {
         let (l, col) = c.tokens.get(c.i.saturating_sub(1)).map_or(c.end, |x| (x.line, x.col));
         // Is it the field of a record? Then what matters are the fields of its model,
@@ -3894,7 +3923,7 @@ impl<'a> Compiler<'a> {
             };
         }
         if let Some(c) = p.get_mut("family") {
-            style.family = Some(interned(&c.string()?));
+            (style.family, style.family_from) = self.family(c)?;
         }
         if let Some(c) = p.get_mut("color") {
             style.color = self.color(c)?;
@@ -4057,7 +4086,7 @@ impl<'a> Compiler<'a> {
             style.weight = self.constant(c, "an input's `weight:`")? as u16;
         }
         if let Some(c) = p.get_mut("family") {
-            style.family = Some(interned(&c.string()?));
+            (style.family, style.family_from) = self.family(c)?;
         }
         if let Some(c) = p.get_mut("color") {
             style.color = self.color(c)?;

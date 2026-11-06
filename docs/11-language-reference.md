@@ -739,6 +739,17 @@ font file "fonts/PressStart2P-Regular.ttf"
 text "1UP" { at: 16, 16; size: 8; family: "Press Start 2P"; color: #fcfcfc }
 ```
 
+**A family from a text.** `family:` also takes the name of a text whose value is
+the family (or a component's argument that is one), and then the font changes
+whenever the text does, while the scene runs: a theme that lets you pick the
+font, a component told which one to use. An empty text is the system's sans.
+It works the same on a `text` and on an `input`.
+
+```
+text face = "Inter"
+text "Hello" { at: 16, 16; size: 14; family: face }
+```
+
 **A figure is an svg read as geometry, not as a stamp.** An image is rasterised
 into an atlas: it shows, but it is a sticker —it melts into nothing, it cannot
 be tinted by parts nor animated by layers, and scaling it is pixels—. `figure

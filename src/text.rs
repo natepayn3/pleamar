@@ -143,6 +143,12 @@ impl LayoutKey {
     }
 
     /// The same, in another weight: a text whose weight is worked out each frame.
+    /// The same, in another family (`None`: the system sans).
+    pub fn familied(mut self, family: Option<&'static str>) -> LayoutKey {
+        self.family = family;
+        self
+    }
+
     pub fn weighted(mut self, weight: u16) -> LayoutKey {
         self.weight = weight;
         self

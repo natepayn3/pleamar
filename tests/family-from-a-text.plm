@@ -1,0 +1,15 @@
+language 0.7
+
+// `family:` from a text: the font changes when the text does, while it runs.
+scene FamilyFromAText {
+    text face = "DejaVu Serif"
+    text query = ""
+    surface { size: 300, 120 }
+    component Label(f: text, y) {
+        text "label" { at: 0, y; size: 14; family: f }
+    }
+    text "live" { at: 0, 0; size: 14; family: face }
+    Label("DejaVu Sans Mono", 40) {}
+    Label(face, 80) {}
+    input query { at: 0, 100; width: 200; family: face }
+}

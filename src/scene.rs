@@ -1252,11 +1252,14 @@ pub struct Style {
     pub weight_of: Option<Expr>,
     /// And for how many lines it takes (`lines: if(open, 12, 2)`): 0 or less, as many as it has.
     pub lines_of: Option<Expr>,
+    /// Its family from a text (`family: face`), read at every frame: empty is
+    /// the system sans. Otherwise it is `family`.
+    pub family_from: Option<TextId>,
 }
 
 impl Style {
     pub fn new(px: f32, color: Color) -> Self {
-        Style { family: None, px, weight: 400, color, line_height: 1.3, align: TextAlign::Left, max_lines: None, markdown: false, tight: false, size: None, weight_of: None, lines_of: None }
+        Style { family: None, px, weight: 400, color, line_height: 1.3, align: TextAlign::Left, max_lines: None, markdown: false, tight: false, size: None, weight_of: None, lines_of: None, family_from: None }
     }
     pub fn weight(mut self, p: u16) -> Self {
         self.weight = p;

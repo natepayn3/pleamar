@@ -432,6 +432,20 @@ mod tests {
     }
 
     #[test]
+    fn a_text_can_take_its_family_from_a_text() {
+        use crate::scene::Instr;
+        let (scene, _) = super::read_file(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/family-from-a-text.plm")).unwrap();
+        let face = scene.texts.iter().position(|t| t.0 == "face").expect("the text face");
+        let styles: Vec<(Option<&str>, Option<usize>)> = scene.instrs.iter().filter_map(|i| match i {
+            Instr::Text { style, .. } | Instr::Field { style, .. } => Some((style.family, style.family_from.map(|t| t.0 as usize))),
+            _ => None,
+        }).collect();
+        // The text itself follows it; a component given a name in quotes keeps
+        // that name, given the text it follows it too; and so does an input.
+        assert_eq!(styles, vec![(None, Some(face)), (Some("DejaVu Sans Mono"), None), (None, Some(face)), (None, Some(face))]);
+    }
+
+    #[test]
     fn a_surface_can_take_its_monitor_from_a_text() {
         let (scene, _) = super::read_file(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/screens-from-a-text.plm")).unwrap();
         let main = &scene.surfaces[0];
