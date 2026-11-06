@@ -2406,11 +2406,15 @@ pub fn run(
                             let b = placed.layout.as_ref().map_or(0, |m| m.byte_at_x(local.0 - placed.x0 + placed.scroll));
                             let b = if placed.secret { crate::gpu::unmasked_byte(&texts[placed.text], b) } else { b };
                             let b = b.min(texts[placed.text].len());
-                            // A second click in a row (or a third) takes all of it: a name is
-                            // chosen whole, to be typed over.
+                            // A second click in a row takes the word it lands on (in «cat.png», «cat»
+                            // or «png»), as on a text that can be selected; a third takes all of it.
                             let again = now.duration_since(clicks.0) < Duration::from_millis(450) && (p.0 - clicks.1 .0).hypot(p.1 - clicks.1 .1) < 5.0;
                             clicks = (now, p, if again { clicks.2 % 3 + 1 } else { 1 });
-                            let (anchor, cursor) = if clicks.2 >= 2 { (0, texts[placed.text].len()) } else { (b, b) };
+                            let (anchor, cursor) = match clicks.2 {
+                                1 => (b, b),
+                                2 => word_around(&texts[placed.text], b),
+                                _ => (0, texts[placed.text].len()),
+                            };
                             editing = Some(Editing { field: placed.text, cursor, anchor });
                             last_key = now;
                         }
@@ -6908,6 +6912,12 @@ mod follows_tests {
 #[cfg(test)]
 mod selection_tests {
     use super::*;
+
+    #[test]
+    fn a_double_click_in_a_field_takes_the_word() {
+        assert_eq!(word_around("cat.png", 1), (0, 3));
+        assert_eq!(word_around("cat.png", 5), (4, 7));
+    }
 
     #[test]
     fn ctrl_moves_and_deletes_a_word_at_a_time() {
