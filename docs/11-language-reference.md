@@ -449,6 +449,8 @@ With the scene's surface (the one with no name), what is repeated is the loose d
 
 Its loose `prop`s and `fact`s, though, are **one for all the copies**: they are not drawing. So what a `follow` follows must not depend on which copy it is —`follow a = screen.index` ends up as the last copy's in every one—; say which monitor shows something in its `show:` instead, which is drawing and is read per copy.
 
+**A named surface beside the copies** (one with its own `screens:`, such as a text naming the monitor a panel was opened on) reads `screen.index`, `screen.width` and `screen.height` from **the copy on its monitor**, and so do the loose `let`s it names: `let mine = if(panel_on == screen.index, 1, 0)` is 1 there when the copy it sits over is the panel's, as it is in that copy. On a monitor without a copy, `screen.index` is -1. So a panel the copies all open can be drawn once, on a surface of its own that follows the monitor, instead of once in every copy.
+
 ```
 surface { size: full, 44; anchor: top; screens: each }
 model mon max 4 { active: number = 1; title: text }     // one record per monitor, from the logic

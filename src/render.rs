@@ -550,6 +550,7 @@ pub fn run(
 
     // ── state ────────────────────────────────────────────────────
     let mut scene = Scene::default();
+    let mut own_screens = OwnScreens::default();
     let mut props: Vec<Animated> = Vec::new();
     let mut facts: Vec<f32> = Vec::new();
     let mut inside: Vec<bool> = Vec::new();
@@ -995,6 +996,7 @@ pub fn run(
                         fresh.gestures.len(), fresh.rules.len(), fresh.zones.len()
                     );
                     scene = fresh;
+                    own_screens = OwnScreens::of(&scene);
                     z_memo = None;
                     window_instrs = None;
                     draw.hidden.clear();
@@ -2873,6 +2875,7 @@ pub fn run(
         // And the copies of a `screens: each` surface for monitors that are not
         // there: `each max 4` with one monitor was four times the scene's rules
         // every frame, for three copies nobody sees. The first copy always runs.
+        own_screens.update(&sheets, &texts, &mut facts);
         let asleep: Vec<&crate::scene::Span> = {
             let c = Ctx { props: &props, facts: &facts, seen: None };
             let shown = |k: usize| sheets.iter().any(|l| l.view.surface == k);
@@ -5812,6 +5815,65 @@ fn error_banner(message: &str, width: f32) -> Vec<Instr> {
 /// not one for each surface: the scene's named ones sit on the same monitor as its main
 /// one and are not another monitor. The lock's are left out: they go without a
 /// `SheetGone`, and their name is the monitor's with " (lock)" after it.
+/// A named surface beside the copies of `screens: each` reads `NAME.screen.index`,
+/// `.width` and `.height` for its `screen.*` (see the compiler): those of the copy on
+/// the monitor it is shown on, which moves when its `screens:` text does. On a monitor
+/// without a copy, index -1 (it is none of them) and the scene's `screen.width` and
+/// `.height`. Where those names are is found once per scene, not every round.
+#[derive(Default)]
+struct OwnScreens {
+    /// Each such surface: its number, and its three facts (index, width, height).
+    surfaces: Vec<(usize, [usize; 3])>,
+    /// Each copy: its `screen.K.name` text and its width and height facts.
+    copies: Vec<(usize, Option<usize>, Option<usize>)>,
+    /// The scene's own `screen.width` and `screen.height`.
+    plain: (Option<usize>, Option<usize>),
+}
+
+impl OwnScreens {
+    fn of(scene: &Scene) -> Self {
+        let fact = |n: &str| scene.facts.iter().position(|h| h.0 == n);
+        let surfaces = scene
+            .surfaces
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| !s.name.is_empty() && !matches!(s.screens, Screens::Number(_)) && !s.lock_screen && s.window.is_none())
+            .filter_map(|(k, s)| {
+                let [i, w, h] = ["index", "width", "height"].map(|part| fact(&format!("{}.screen.{part}", s.name)));
+                Some((k, [i?, w?, h?]))
+            })
+            .collect::<Vec<_>>();
+        if surfaces.is_empty() {
+            return Self::default();
+        }
+        let copies = (0..8)
+            .map_while(|c| {
+                let t = scene.texts.iter().position(|t| t.0 == format!("screen.{c}.name"))?;
+                Some((t, fact(&format!("screen.{c}.width")), fact(&format!("screen.{c}.height"))))
+            })
+            .collect();
+        Self { surfaces, copies, plain: (fact("screen.width"), fact("screen.height")) }
+    }
+
+    fn update(&self, sheets: &[Sheet], texts: &[String], facts: &mut [f32]) {
+        for &(k, [fi, fw, fh]) in &self.surfaces {
+            let Some(monitor) = sheets.iter().find(|l| l.view.surface == k && l.view.popup.is_none()).map(|l| l.name.as_str()) else { continue };
+            let copy = self.copies.iter().position(|(t, _, _)| texts.get(*t).is_some_and(|v| v == monitor));
+            let (index, (w, h)) = match copy {
+                Some(c) => (c as f32, (self.copies[c].1, self.copies[c].2)),
+                None => (-1.0, self.plain),
+            };
+            facts[fi] = index;
+            if let Some(v) = w.and_then(|i| facts.get(i).copied()) {
+                facts[fw] = v;
+            }
+            if let Some(v) = h.and_then(|i| facts.get(i).copied()) {
+                facts[fh] = v;
+            }
+        }
+    }
+}
+
 fn screens_showing(sheets: &[Sheet], surfaces: &[Surface]) -> usize {
     sheets
         .iter()

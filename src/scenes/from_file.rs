@@ -560,6 +560,30 @@ mod tests {
     }
 
     #[test]
+    fn a_named_surface_beside_the_copies_reads_the_copy_on_its_monitor() {
+        // A panel of its own (`screens: on`) sent to the second monitor said copy 0's
+        // `screen.index` and `screen.width`, so a `let` it shared with the copies
+        // —"the panel is on this copy"— was false there.
+        let set = set_by_rules("scene Beside {
+    surface { size: full, 40; anchor: top; screens: each max 2 }
+    text on = \"B\"
+    fact panel_on = 1
+    let mine = if(panel_on == screen.index, 1, 0)
+    surface sheet {
+        size: 200, 200; anchor: top; screens: on
+        on demo { a = mine; b = screen.width; c = screen.index }
+    }
+    fact a = 0
+    fact b = 0
+    fact c = 0
+}
+", &[("screen.0.width", 100.0), ("screen.1.width", 300.0), ("sheet.screen.index", 1.0), ("sheet.screen.width", 300.0)]);
+        assert_eq!(set["a"], vec![1.0]);
+        assert_eq!(set["b"], vec![300.0]);
+        assert_eq!(set["c"], vec![1.0]);
+    }
+
+    #[test]
     fn each_copy_of_a_surface_measures_its_own_monitor() {
         // A phone's monitor of 442 came last and said `bar.width` for every copy: the bar on
         // the 1920 one was laid out for 442, and stayed so when the phone went.

@@ -232,6 +232,9 @@ struct Scope {
     /// The strings with holes, already resolved where they were written: `Chip("{n.app}")`.
     contents: HashMap<String, Content>,
     alias: HashMap<String, String>,
+    /// Inside a named surface beside the copies of `screens: each`: the mark its own
+    /// reading of a loose `let` is stored with (`crosses#on.panel`), as a copy's is with its suffix.
+    let_mark: String,
     /// Of those names, the ones that have parts: `label.width` belongs to the measure `label`.
     with_parts: std::collections::HashSet<String>,
     suffix: String,
@@ -1683,7 +1686,13 @@ impl<'a> Compiler<'a> {
         let n = &self.global(n);
         // Inside a screen copy, a `let` that was read once per
         // copy is stored with its mark: that is its own.
-        let marked = self.scopes.iter().rev().find(|e| e.suffix.starts_with("#screen")).map(|e| format!("{n}{}", e.suffix)).filter(|m| self.lets.contains_key(m));
+        let marked = self
+            .scopes
+            .iter()
+            .rev()
+            .find_map(|e| if e.suffix.starts_with("#screen") { Some(&e.suffix) } else if !e.let_mark.is_empty() { Some(&e.let_mark) } else { None })
+            .map(|mark| format!("{n}{mark}"))
+            .filter(|m| self.lets.contains_key(m));
         let n = match &marked {
             Some(m) => m,
             None => n,
@@ -2842,6 +2851,19 @@ impl<'a> Compiler<'a> {
                             if let Ok(own) = own {
                                 let own = if own.node_count() > 8 { self.computed_once(&name, own).e() } else { own };
                                 self.lets.insert(format!("{name}#screen{k}"), own);
+                            }
+                        }
+                        // And once for each named surface beside them, with what its monitor's copy holds.
+                        for surface in self.beside_copies() {
+                            let env = self.own_screen_scope(&surface);
+                            let mark = env.let_mark.clone();
+                            self.scopes.push(Rc::new(env));
+                            let mut c2 = Cur::new(&n.head[3..], n.line, n.col);
+                            let own = self.expr(&mut c2);
+                            self.scopes.pop();
+                            if let Ok(own) = own {
+                                let own = if own.node_count() > 8 { self.computed_once(&name, own).e() } else { own };
+                                self.lets.insert(format!("{name}{mark}"), own);
                             }
                         }
                     }
@@ -4679,6 +4701,12 @@ impl<'a> Compiler<'a> {
                         env.alias.insert(format!("screen.{part}"), format!("{name}.{part}"));
                     }
                     Some(env)
+                } else if self.beside_copies().contains(&name) {
+                    // Beside the copies of `screens: each`, a named surface reads its
+                    // `screen.index`, `.width` and `.height` from the copy on ITS monitor
+                    // (see `own_screen_scope`).
+                    let env = self.own_screen_scope(&name);
+                    Some(env)
                 } else {
                     None
                 };
@@ -5071,6 +5099,39 @@ impl<'a> Compiler<'a> {
         let (mut props, mut facts) = (Vec::new(), Vec::new());
         e.inputs(&mut props, &mut facts);
         props.iter().any(|p| self.copy_props.contains(p))
+    }
+
+    /// The named surfaces of a scene copied per monitor (not a lock, not a window):
+    /// each is one surface that goes to the monitors its `screens:` says.
+    fn beside_copies(&self) -> Vec<String> {
+        if !self.e.surfaces.iter().any(|s| s.name.is_empty() && matches!(s.screens, Screens::Number(_))) {
+            return Vec::new();
+        }
+        let mut out: Vec<String> = Vec::new();
+        for s in &self.e.surfaces {
+            if !s.name.is_empty() && !matches!(s.screens, Screens::Number(_)) && !s.lock_screen && s.window.is_none() && !out.contains(&s.name) {
+                out.push(s.name.clone());
+            }
+        }
+        out
+    }
+
+    /// Inside one of those: `screen.index`, `.width` and `.height` are the copy's on
+    /// its monitor, which the render keeps in `NAME.screen.*` (index -1 on a monitor
+    /// without a copy). They were the plain `screen.*`, which is copy 0's: a panel sent
+    /// to the second monitor measured the first, and every `if(panel_on == screen.index, …)`
+    /// it shared with the copies said no.
+    fn own_screen_scope(&mut self, name: &str) -> Scope {
+        let mut env = Scope { let_mark: format!("#on.{name}"), ..Default::default() };
+        for part in ["index", "width", "height"] {
+            let full_name = format!("{name}.screen.{part}");
+            if !self.facts.contains_key(&full_name) {
+                let h = self.e.fact(interned(&full_name), if part == "index" { -1.0 } else { 0.0 });
+                self.facts.insert(full_name.clone(), h);
+            }
+            env.alias.insert(format!("screen.{part}"), full_name);
+        }
+        env
     }
 
     /// Inside a `screens: each` surface: what holds for that copy.
