@@ -247,6 +247,12 @@ programs need [nixGL] to reach your GPU driver.
 
 # Your first scene
 
+**Writing scenes by hand?** The [guide][Guide] takes you from zero to a working
+bar, step by step; the [recipes](docs/recipes.md) are patterns to copy, and the
+[reference][Reference] lists every element and property. In your editor,
+`pleamar --lsp` gives errors and completion (see [`editor/`](editor/)), and
+`pleamar --docs` prints the documentation of the version you have installed.
+
 ```plm
 language 0.1
 scene Clock {
