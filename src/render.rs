@@ -1485,6 +1485,11 @@ pub fn run(
                             desks.minimized[slot] = false;
                             desks.floating[slot] = false;
                             desks.pending[slot] = n.manual;
+                            // It has drawn nothing yet: not the size of the window
+                            // its slot held before (a scene that waits for its first
+                            // frame reads `width` and `height` as 0 until it comes).
+                            nest_fact(&scene, &mut facts, &to_logic, &format!("{name}.{slot}.width"), 0.0);
+                            nest_fact(&scene, &mut facts, &to_logic, &format!("{name}.{slot}.height"), 0.0);
                             // Said with `open`, not at the next order: a rule that waits for
                             // `open` reads it as it is.
                             nest_fact(&scene, &mut facts, &to_logic, &format!("{name}.{slot}.pending"), n.manual as u8 as f32);
