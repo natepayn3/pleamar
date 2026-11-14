@@ -1430,8 +1430,8 @@ pub fn run(
                         // not to try again until the scene releases it itself.
                         for &k in &locks {
                             sheets.retain(|l| !(l.view.surface == k && l.view.popup.is_none()));
-                            crate::platform::lock_screen(k, None);
                         }
+                        let _ = crate::platform::lock_screen(Vec::new());
                         if let Some(g) = &gpu {
                             assign_pace(g, &mut sheets, size, op.no_vsync);
                         }
@@ -4518,16 +4518,29 @@ pub fn run(
         // true and removed when it stops being so. When removing them, first what was
         // being painted on them is released and then them, like a popup.
         let want: Vec<(usize, bool)> = scene.surfaces.iter().enumerate().filter(|(_, s)| s.lock_screen).map(|(k, _)| (k, open(k))).collect();
+        // The copies of a lock with `screens: each` are asked all together: every monitor gets
+        // its own copy's face when the lock is engaged. Only once it is really asked: a scene
+        // that starts locked asks before the Wayland side is ready, and it was taken as asked
+        // —the lock never came—.
+        let starting: Vec<(usize, ((u32, u32), (f32, f32), Screens))> = want
+            .iter()
+            .filter(|(k, wants)| *wants && !locks.contains(k))
+            .map(|(k, _)| {
+                let s = &scene.surfaces[*k];
+                (*k, ((s.width, s.height), s.origin, s.screens.clone()))
+            })
+            .collect();
+        if !starting.is_empty() && locks.is_empty() && crate::platform::lock_screen(starting.clone()) {
+            locks.extend(starting.iter().map(|(k, _)| *k));
+        }
         for (k, wants) in want {
             let was = locks.contains(&k);
-            if wants && !was {
-                locks.push(k);
-                let s = &scene.surfaces[k];
-                crate::platform::lock_screen(k, Some(((s.width, s.height), s.origin, s.screens.clone())));
-            } else if !wants && was {
+            if !wants && was {
                 locks.retain(|x| *x != k);
                 sheets.retain(|l| !(l.view.surface == k && l.view.popup.is_none()));
-                crate::platform::lock_screen(k, None);
+                if locks.is_empty() {
+                    let _ = crate::platform::lock_screen(Vec::new());
+                }
                 if let Some(g) = &gpu {
                     assign_pace(g, &mut sheets, size, op.no_vsync);
                 }

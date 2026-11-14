@@ -371,11 +371,16 @@ pub fn popup(k: usize, what: Option<([i32; 4], (f32, f32))>) {
 /// On Wayland it's `ext-session-lock`: the compositor guarantees it, not the drawing.
 /// On Windows it will be `LockWorkStation`, which brings its own screen; on macOS, the
 /// screen saver with password.
-pub fn lock_screen(which: usize, what: Option<((u32, u32), (f32, f32), crate::scene::Screens)>) {
+/// `false` if it could not be asked yet (the system side is not ready): the render asks again.
+/// All the copies of the lock surface come at once (`screens: each`); none releases it.
+pub fn lock_screen(copies: Vec<(usize, ((u32, u32), (f32, f32), crate::scene::Screens))>) -> bool {
     #[cfg(target_os = "linux")]
-    wayland::lock_screen(which, what);
+    return wayland::lock_screen(copies);
     #[cfg(not(target_os = "linux"))]
-    let _ = (which, what);
+    {
+        let _ = copies;
+        true
+    }
 }
 
 /// The render has let go of the sheet of surface `id`, and with it of its
