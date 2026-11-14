@@ -1495,14 +1495,9 @@ struct Locks {
 }
 
 struct Engaged {
-    which: usize,
-    /// The box the scene declares (`size:`), which gets centred on each monitor,
-    /// and where its piece of the plane lands.
-    bounds: (u32, u32),
-    origin: (f32, f32),
-    /// Which monitors show the scene (`screens:`): a monitor that arrives
-    /// while it is locked gets its face by the same rule.
-    screens: Screens,
+    /// The lock surface, or its copies (`screens: each`: copy k on monitor k): each one asked
+    /// by the render, one after another. A monitor shows the first copy whose `screens:` takes it.
+    copies: Vec<LockCopy>,
     lock: smithay_client_toolkit::session_lock::SessionLock,
     faces: Vec<LockFace>,
     /// Faces whose monitor has gone but that the render still paints: they are
@@ -1512,8 +1507,28 @@ struct Engaged {
     retiring: Vec<LockFace>,
 }
 
+/// One copy of the lock surface: which one of the scene's, the box it declares (`size:`),
+/// which gets centred on each monitor, where its piece of the plane lands, and which
+/// monitors show it (`screens:`; a monitor that arrives while locked follows the same rule).
+#[derive(Clone)]
+struct LockCopy {
+    which: usize,
+    bounds: (u32, u32),
+    origin: (f32, f32),
+    screens: Screens,
+}
+
+impl Engaged {
+    /// The copy a monitor shows, if any does.
+    fn copy_for(&self, name: &str, number: usize) -> Option<LockCopy> {
+        self.copies.iter().find(|k| lock_shows(&k.screens, name, number)).cloned()
+    }
+}
+
 /// The lock surface of ONE monitor.
 struct LockFace {
+    /// The copy of the scene it shows (none for a black cover).
+    copy: Option<LockCopy>,
     id: u32,
     // In order: first what paints is released, then the surface.
     pending: Option<wgpu::Surface<'static>>,
@@ -1534,61 +1549,66 @@ struct LockFace {
 
 static LOCKS: std::sync::OnceLock<Locks> = std::sync::OnceLock::new();
 
-/// `Some((bounds, origin, screens))` engages the lock of surface `which`; `None`
-/// releases it. The render calls it, having already released what it painted before releasing it.
-pub fn lock_screen(which: usize, what: Option<((u32, u32), (f32, f32), Screens)>) {
-    let Some(c) = LOCKS.get() else { return };
+/// Engages the lock with the lock surface, or all its copies at once (`screens: each`: copy k
+/// on monitor k), each `(which, (bounds, origin, screens))`; an empty list releases it. The
+/// render calls it, having already released what it painted before releasing it. Every monitor
+/// gets its face when it is engaged: the first copy whose `screens:` takes it, or a black cover.
+/// (Changing a monitor's face once the lock holds it is refused by compositors.)
+/// `false`: it could not be asked yet (the Wayland side is not ready): ask again.
+pub fn lock_screen(copies: Vec<(usize, ((u32, u32), (f32, f32), Screens))>) -> bool {
+    let Some(c) = LOCKS.get() else { return false };
     let mut engaged = c.engaged.lock().unwrap();
-    let Some((bounds, origin, screens)) = what else {
+    if copies.is_empty() {
         if let Some(e) = engaged.take() {
             e.lock.unlock();
             drop(e);
             let _ = c.connection.flush();
             println!("lock   · unlocked");
         }
-        return;
-    };
-    if engaged.is_some() {
-        return;
+        return true;
     }
+    if engaged.is_some() {
+        return true;
+    }
+    let copies: Vec<LockCopy> = copies.into_iter().map(|(which, (bounds, origin, screens))| LockCopy { which, bounds, origin, screens }).collect();
     let lock = match c.manager.lock(&c.qh) {
         Ok(l) => l,
         Err(_) => {
             eprintln!("lock   · this compositor has no ext-session-lock: the session cannot be locked from here");
-            return;
+            return true;
         }
     };
     // One face per monitor, and all at once: until they're all there, the
     // compositor doesn't consider the session locked. The monitors the scene is
     // not on (`screens:`) are covered all the same, in black.
     let monitors = c.monitors.lock().unwrap();
-    let shown: Vec<bool> = monitors
-        .iter()
-        .enumerate()
-        .map(|(number, (_, name, _))| lock_shows(&screens, name, number))
-        .collect();
-    // On none of them (a monitor unplugged), on all: a lock with nowhere to type
-    // the password would be no way back.
-    let everywhere = !shown.contains(&true);
+    let names: Vec<&str> = monitors.iter().map(|(_, name, _)| name.as_str()).collect();
+    let screens: Vec<&Screens> = copies.iter().map(|k| &k.screens).collect();
+    let chosen = lock_faces(&screens, &names);
+    let first = copies[0].clone();
     let faces = monitors
         .iter()
-        .zip(shown)
-        .map(|((output, name, mhz), shows)| lock_face(c, &lock, output, name, *mhz, shows || everywhere, origin))
+        .zip(chosen)
+        .map(|((output, name, mhz), copy)| lock_face(c, &lock, output, name, *mhz, copy.map(|k| copies[k].clone()), &first))
         .collect();
     drop(monitors);
-    *engaged = Some(Engaged { which, bounds, origin, screens, lock, faces, retiring: Vec::new() });
+    *engaged = Some(Engaged { copies, lock, faces, retiring: Vec::new() });
     let _ = c.connection.flush();
+    true
 }
 
 /// The lock face of one monitor: the scene, if `shows`, or else a plain black
 /// cover, far from anything of the scene so that the mouse over it touches nothing.
-fn lock_face(c: &Locks, lock: &smithay_client_toolkit::session_lock::SessionLock, output: &wl_output::WlOutput, name: &str, mhz: i32, shows: bool, origin: (f32, f32)) -> LockFace {
+fn lock_face(c: &Locks, lock: &smithay_client_toolkit::session_lock::SessionLock, output: &wl_output::WlOutput, name: &str, mhz: i32, copy: Option<LockCopy>, first: &LockCopy) -> LockFace {
     let wl = c.compositor.create_surface(&c.qh);
     let id = next_surface_id();
     let surface = lock.create_lock_surface(wl, output, &c.qh);
-    if !shows && c.shm.is_some() {
-        return LockFace { id, pending: None, viewport: None, _fractional_scale: None, name: name.to_string(), mhz, view_origin: (-1e7, -1e7), cover: Some(None), output: output.clone(), surface };
-    }
+    // Without shared memory there is no black cover: the first copy is shown instead.
+    let copy = match copy {
+        Some(k) => k,
+        None if c.shm.is_none() => first.clone(),
+        None => return LockFace { copy: None, id, pending: None, viewport: None, _fractional_scale: None, name: name.to_string(), mhz, view_origin: (-1e7, -1e7), cover: Some(None), output: output.clone(), surface },
+    };
     let viewport = c.viewporter.as_ref().map(|v| v.get_viewport(surface.wl_surface(), &c.qh, Silent));
     let fractional_scale = c.fractional_scales.as_ref().map(|m| m.get_fractional_scale(surface.wl_surface(), &c.qh, ScaleFor(id)));
     let paints = unsafe {
@@ -1599,7 +1619,19 @@ fn lock_face(c: &Locks, lock: &smithay_client_toolkit::session_lock::SessionLock
             })
             .ok()
     };
-    LockFace { id, pending: paints, viewport, _fractional_scale: fractional_scale, name: name.to_string(), mhz, view_origin: origin, cover: None, output: output.clone(), surface }
+    let origin = copy.origin;
+    LockFace { copy: Some(copy), id, pending: paints, viewport, _fractional_scale: fractional_scale, name: name.to_string(), mhz, view_origin: origin, cover: None, output: output.clone(), surface }
+}
+
+/// Which copy of the lock each monitor shows (`None`: a black cover): the first whose `screens:`
+/// takes it. With `screens: each`, copy k on monitor k. On none of them (the monitors it names
+/// are unplugged), the first copy on all: a lock with nowhere to type the password would be no way back.
+fn lock_faces(copies: &[&Screens], monitors: &[&str]) -> Vec<Option<usize>> {
+    let chosen: Vec<Option<usize>> = monitors.iter().enumerate().map(|(number, name)| copies.iter().position(|s| lock_shows(s, name, number))).collect();
+    if chosen.iter().all(Option::is_none) && !copies.is_empty() {
+        return vec![Some(0); monitors.len()];
+    }
+    chosen
 }
 
 /// Which monitors show the scene, by the lock's `screens:`.
@@ -1630,8 +1662,9 @@ fn lock_face_for_new_monitor(output: &wl_output::WlOutput, name: &str, number: u
     if e.faces.iter().any(|f| &f.output == output) {
         return;
     }
-    let shows = lock_shows(&e.screens, name, number);
-    let face = lock_face(c, &e.lock, output, name, mhz, shows, e.origin);
+    let copy = e.copy_for(name, number);
+    let Some(first) = e.copies.first().cloned() else { return };
+    let face = lock_face(c, &e.lock, output, name, mhz, copy, &first);
     let covered = face.cover.is_some();
     e.faces.push(face);
     let _ = c.connection.flush();
@@ -1661,7 +1694,8 @@ fn promote_first_cover(c: &Locks, e: &mut Engaged) {
     let cover = e.faces.remove(0);
     let (output, name, mhz) = (cover.output.clone(), cover.name.clone(), cover.mhz);
     drop(cover);
-    let face = lock_face(c, &e.lock, &output, &name, mhz, true, e.origin);
+    let Some(first) = e.copies.first().cloned() else { return };
+    let face = lock_face(c, &e.lock, &output, &name, mhz, Some(first.clone()), &first);
     e.faces.insert(0, face);
     let _ = c.connection.flush();
     println!("lock   · {name} shows the lock: the monitors it was meant for are not here");
@@ -2285,8 +2319,9 @@ impl smithay_client_toolkit::session_lock::SessionLockHandler for State {
         let Some(c) = LOCKS.get() else { return };
         let mut engaged = c.engaged.lock().unwrap();
         let Some(e) = engaged.as_mut() else { return };
-        let (which, bounds, origin) = (e.which, e.bounds, e.origin);
         let Some(face) = e.faces.iter_mut().find(|k| k.surface.wl_surface() == surface.wl_surface()) else { return };
+        // Each face shows its own copy (`screens: each`): its place in the plane and its box.
+        let (which, bounds, origin) = face.copy.as_ref().map_or((0, (0, 0), (0.0, 0.0)), |k| (k.which, k.bounds, k.origin));
         let size = conf.new_size;
         // A cover: black, as big as its monitor. Zeroed memory is black in XRGB.
         if let (Some(cover), Some(shm)) = (face.cover.as_mut(), c.shm.as_ref()) {
@@ -2982,5 +3017,31 @@ mod tests {
         assert!(dirs.contains(&data_home.join("icons/hicolor/48x48/apps")));
         assert!(dirs.contains(&data_home.join("pixmaps")));
         let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod lock_tests {
+    use super::{lock_faces, Screens};
+
+    #[test]
+    fn every_monitor_shows_the_lock_copy_it_is_for() {
+        // The report (pleamar 0.7.26): four monitors —two landscape, one turned, one off and so not
+        // there— and only one showed the lock. With `screens: each` each copy is asked for its
+        // own monitor, and every one of them has to show its own, not only the first.
+        let monitors = ["DP-1", "DP-2", "HDMI-A-1"];
+        let each: Vec<Screens> = (0..3).map(Screens::Number).collect();
+        assert_eq!(lock_faces(&each.iter().collect::<Vec<_>>(), &monitors), vec![Some(0), Some(1), Some(2)]);
+        // Without it, the one surface on all of them.
+        assert_eq!(lock_faces(&[&Screens::All], &monitors), vec![Some(0); 3]);
+        // A copy whose monitor is not there (the fourth, off): the others still show theirs.
+        let four: Vec<Screens> = (0..4).map(Screens::Number).collect();
+        assert_eq!(lock_faces(&four.iter().collect::<Vec<_>>(), &monitors), vec![Some(0), Some(1), Some(2)]);
+        // Named monitors: the rest get black covers.
+        let named = Screens::Named(vec!["DP-2".into()]);
+        assert_eq!(lock_faces(&[&named], &monitors), vec![None, Some(0), None]);
+        // None of the named ones plugged in: the lock everywhere, never nowhere to type.
+        let away = Screens::Named(vec!["eDP-1".into()]);
+        assert_eq!(lock_faces(&[&away], &monitors), vec![Some(0); 3]);
     }
 }
