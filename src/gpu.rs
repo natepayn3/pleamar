@@ -2118,9 +2118,7 @@ impl DrawList {
 
     fn element(&mut self, kind: f32, bounds: [f32; 4], clips: &[(usize, [f32; 4])], fill: impl FnOnce(&mut [f32])) {
         // What does not fall on the surface nor on any open popup does not exist.
-        let touches = |v: &[f32; 4]| bounds[0] < v[2] && bounds[2] > v[0] && bounds[1] < v[3] && bounds[3] > v[1];
-        let frame = [0.0, 0.0, self.size.0, self.size.1];
-        let frame = if touches(&frame) { frame } else { self.views.iter().copied().find(|v| touches(v)).unwrap_or(frame) };
+        let frame = element_frame(bounds, self.size, &self.views);
         let mut c = [bounds[0].max(frame[0]), bounds[1].max(frame[1]), bounds[2].min(frame[2]), bounds[3].min(frame[3])];
         for (_, r) in clips {
             c = [c[0].max(r[0]), c[1].max(r[1]), c[2].min(r[2]), c[3].min(r[3])];
@@ -7065,5 +7063,46 @@ mod crisp_tests {
         let mut turned = shape(1, 50.0, 30.0, 40.0, 20.0, 1.0);
         turned.rotation = 0.3;
         assert_eq!(crisp_stroke(turned, 1.0).cx - crisp_stroke(turned, 1.0).mx, 10.0);
+    }
+}
+
+/// What an element is cut to: the box of everything it falls on —the surface, and every view of
+/// the plane a sheet or a popup shows— that it touches, all of them together. One surface shown
+/// by several sheets of different shapes (a lock on a landscape monitor and a turned one) has a
+/// view each: cut to the first of them alone, a backdrop painted large reached the turned
+/// monitor only where it overlapped the landscape one (reported on Discord, 0.7.26).
+fn element_frame(bounds: [f32; 4], size: (f32, f32), views: &[[f32; 4]]) -> [f32; 4] {
+    let touches = |v: &[f32; 4]| bounds[0] < v[2] && bounds[2] > v[0] && bounds[1] < v[3] && bounds[3] > v[1];
+    let main = [0.0, 0.0, size.0, size.1];
+    let mut frame: Option<[f32; 4]> = None;
+    for v in std::iter::once(&main).chain(views.iter()) {
+        if touches(v) {
+            frame = Some(match frame {
+                None => *v,
+                Some(f) => [f[0].min(v[0]), f[1].min(v[1]), f[2].max(v[2]), f[3].max(v[3])],
+            });
+        }
+    }
+    frame.unwrap_or(main)
+}
+
+#[cfg(test)]
+mod element_frame_tests {
+    #[test]
+    fn a_lock_backdrop_covers_a_turned_monitor_beside_a_landscape_one() {
+        // The lock's box centred on each monitor: a landscape view and a turned one, the
+        // backdrop drawn 8000 × 8000 around it. It has to reach all of both.
+        let landscape = [-660.0, -390.0, 1260.0, 690.0];
+        let turned = [-240.0, -810.0, 840.0, 1110.0];
+        let backdrop = [-4000.0, -4000.0, 4000.0, 4000.0];
+        let f = super::element_frame(backdrop, (40.0, 20.0), &[landscape, turned]);
+        for v in [landscape, turned] {
+            assert!(f[0] <= v[0] && f[1] <= v[1] && f[2] >= v[2] && f[3] >= v[3], "{f:?} does not cover {v:?}");
+        }
+        // What touches only one view is cut to it, as before.
+        let small = [0.0, 1000.0, 10.0, 1010.0];
+        assert_eq!(super::element_frame(small, (40.0, 20.0), &[landscape, turned]), turned);
+        // And on the surface alone, to the surface.
+        assert_eq!(super::element_frame([5.0, 5.0, 10.0, 10.0], (40.0, 20.0), &[]), [0.0, 0.0, 40.0, 20.0]);
     }
 }
