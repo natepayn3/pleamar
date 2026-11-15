@@ -3,7 +3,7 @@
 **What this note is.** The complete, exact description of what the language accepts. [The language — the guide](09-language-v0.md) is the guide —read straight through, with the reason behind each thing—; this is where a doubt gets looked up. It comes from the compiler (`src/language/`), not from memory, and **it cannot fall behind without `./run-tests.sh` saying so**: its whole examples compile, and its vocabulary (§17) is compared against the one the compiler consults.
 
 ```sh
-pleamar --version                  # pleamar 0.7.7 · language 0.9
+pleamar --version                  # pleamar 0.8.0-exp.22 · language 0.10
 pleamar --check scene.plm      # reads it, with whatever it imports; says whether it is fine, exits
 ./run-tests.sh                        # tests/*.plm, examples/*.plm and the examples in this note
 ```
@@ -16,7 +16,7 @@ The language has a number of its own, apart from the program's: **0.9**. The fir
 language 0.1
 ```
 
-If it asks for a different first number, or a second one higher than the program understands, it is an error on load —`this file asks for language 0.99, and this pleamar understands 0.9`— and not a half-built scene. A file that asks for 0.1 is still read by 0.9: what 0.2 added —a group's own `shader:`, workspaces, `pick`, `import … as`, `drag.over`— and what 0.3 added —what a zone tells an agent: `label:`, `agent:`, `role:`, `value:`, `checked:`, `selected:`—, what 0.4 added —a sheet of pictures' `cell:` and `pixels` for pixel art—, and what 0.5 added —a list that sticks to its end (`stick: end`), a child placed on its own across its layout (`place:`), a text as wide as what it says (`tight: true`), a `lines:` that changes, `motion.reduced` and `color.scheme`, a `launch` with holes, a `text` chosen with `if`, and `hover`/`away` over several zones—, and what 0.6 added —a quote inside a text (`\"`), a block opened on the line after its header, and a `let` that is a colour chosen with `pick` or `if`—, what 0.7 added —a terminal drawn by the scene (`terminal`, §10.4)—, what 0.8 added —a window put aside, on no workspace (`send win(k) aside`)—, and what 0.9 added —a zone that yields to what is below it (`yields: true`)— it simply does not use. Without that line, it is read with whatever is there. While the first is 0, nothing is promised: this is a language still being made.
+If it asks for a different first number, or a second one higher than the program understands, it is an error on load —`this file asks for language 0.99, and this pleamar understands 0.9`— and not a half-built scene. A file that asks for 0.1 is still read by 0.9: what 0.2 added —a group's own `shader:`, workspaces, `pick`, `import … as`, `drag.over`— and what 0.3 added —what a zone tells an agent: `label:`, `agent:`, `role:`, `value:`, `checked:`, `selected:`—, what 0.4 added —a sheet of pictures' `cell:` and `pixels` for pixel art—, and what 0.5 added —a list that sticks to its end (`stick: end`), a child placed on its own across its layout (`place:`), a text as wide as what it says (`tight: true`), a `lines:` that changes, `motion.reduced` and `color.scheme`, a `launch` with holes, a `text` chosen with `if`, and `hover`/`away` over several zones—, and what 0.6 added —a quote inside a text (`\"`), a block opened on the line after its header, and a `let` that is a colour chosen with `pick` or `if`—, what 0.7 added —a terminal drawn by the scene (`terminal`, §10.4)—, what 0.8 added —a window put aside, on no workspace (`send win(k) aside`)—, what 0.9 added —a zone that yields to what is below it (`yields: true`)—, and what 0.10 added —the programs' widgets drawn by the scene (`windows … desk N`)— it simply does not use. Without that line, it is read with whatever is there. While the first is 0, nothing is promised: this is a language still being made.
 
 ## 2. What it guarantees
 
@@ -1634,6 +1634,17 @@ that holds), which are the scene's.
 **Workspaces that stay: `windows win max 16 workspaces kept`.** As they come, workspaces are tide pools (below): an empty one that is not shown dries up, and there is never more than one empty past the last with windows. With `workspaces kept` they are a Mac's desktops: the ones a monitor has are the ones made, empty or not, shown or not. One more is made by going one past the last (`workspace win.pools.0 + 1 on 0`), and one goes only when it is closed (`close workspace n`). `dock programs` and `workspaces kept` go in that order when both are written.
 
 **Where a new window goes: `windows win max 16 placement manual`.** Without it, a window that opens counts at once: it is in `among`, `win.on.$s`, `rank`, `win.order` and `win.count` from its first frame, and the layout makes room for it before the scene has decided where it goes. With it, a window that opens is **pending** (`win.$i.pending` is true) and in none of those, until a rule takes it with **`accept win(i)`**: then it gets its place, and the others make room. What the scene decides in between —a row, a key to sort it by, a side to dock on— is set in that same rule, before `accept`: `on change win.$i.open while win.$i.pending { row.$i = ...; accept win(i) }`. Written with the others, it goes after `dock programs` and before `workspaces kept`.
+
+
+**The programs' widgets on the desktop, drawn by the scene: `windows win max 16 desk 4`.** Under pleamar-wm built with `--features exp`, a program's surface on layer-shell's **bottom** level (a clock, a counter: a widget on the desktop) is not put together apart, under the scene's own surface: it comes to the scene as a window's frames do, in one of `desk`'s slots, right after the windows —`win.16` to `win.19` here—, and the scene draws it where it likes in its own picture, with the same `window`:
+
+```plm
+repeat s in 16..20 {
+    window win.$s { at: win.$s.x, win.$s.y; size: max(win.$s.width, 1), max(win.$s.height, 1); ask: -1, -1; show: win.$s.open and win.$s.screen == screen.index }
+}
+```
+
+So the wallpaper can stay in the scene's own surface under them, and a glass over them sees them. A desk slot has `win.$k.x` and `win.$k.y` (where the program put itself on its monitor: its anchor and margins, in the scene's units), `win.$k.screen`, `win.$k.width`, `win.$k.height` and `win.$k.open`; it is not a window: no dock, workspace, layout, order or keyboard focus of the scene's. Draw it as a picture (`ask: -1, -1`): the presses on it go to the program **where the scene's zones over it yield** (`yields: true`) and the program has an input region (its own zones, if it is a scene), as they do to a widget on the desktop; the lock screen covers the slots and nothing reaches them while it is on. With more widgets than slots, the rest are put together apart, as without `desk`. At most 8. A scene without `desk` is exactly as before, and so is pleamar-wm without `--features exp`.
 
 **Workspaces** are a stack per monitor, each monitor its own, as tide
 pools along a shore: there are as many as hold windows, plus the one shown

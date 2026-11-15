@@ -1,0 +1,19 @@
+language 0.10
+// The programs' widgets on the desktop drawn by the scene (`windows … desk 4`, pleamar-wm built
+// with `--features exp`): the wallpaper stays in this surface and they go over it, in the slots
+// after the windows. A zone over all the desktop yields, so a widget's own buttons take the press
+// and the rest is the desktop's (a right click: its menu).
+scene DeskWidgets {
+    surface { size: full, full }
+    windows win max 4 desk 4
+    fact menus = 0
+    box { at: 0, 0; size: screen.width, screen.height; color: #2b4d6f }
+    repeat s in 4..8 {
+        window win.$s { at: win.$s.x, win.$s.y; size: max(win.$s.width, 1), max(win.$s.height, 1); ask: -1, -1; show: win.$s.open and win.$s.screen == screen.index }
+    }
+    zone box desk { from: 0, 0; size: screen.width, screen.height; yields: true }
+    on press right desk { menus = menus + 1 }
+    repeat k in 0..4 {
+        window win.$k { at: 200 + k * 40, 120 + k * 40; size: 900, 600; show: win.$k.open }
+    }
+}

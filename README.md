@@ -64,7 +64,7 @@ So if you are on Hyprland and just want a new bar, pleamar is all you need.
 | **Hyprland, Sway, niri, river, Wayfire, Labwc…** | ✅ Its home: bars, panels and shells anchor to the screen (layer-shell) |
 | **KDE Plasma (Wayland)** | ✅ Bars and shells work; what is Hyprland's own —its workspaces— does not |
 | **GNOME (Wayland)** | ⚠️ Only scenes in a normal window: GNOME has no layer-shell, so a bar cannot anchor. pleamar-wm can be picked as a session next to it |
-| **pleamar-wm** | ✅ A whole desktop of its own |
+| **pleamar-wm** | ✅ A whole desktop of its own. On `exp2`, with pleamar-wm built with `--features exp`, the programs' widgets on the desktop can be drawn inside the scene itself (`windows … desk N`) |
 | **X11 sessions** | ❌ pleamar is for Wayland |
 
 <div align = center>

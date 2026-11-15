@@ -22,7 +22,7 @@ pub(crate) const PER_FILE: usize = 1_000_000;
 /// The version of the language this program understands. The first number changes
 /// when something written stops being valid; the second, when something is added. A file
 /// can say which one it needs (`language 0.1`) and find out on load, not halfway through.
-pub const VERSION: (u32, u32) = (0, 9);
+pub const VERSION: (u32, u32) = (0, 10);
 
 #[derive(Debug)]
 pub struct CompileError {

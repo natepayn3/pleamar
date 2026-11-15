@@ -6,6 +6,12 @@ license = "BSD-3-Clause"
 description = "A desktop shell language and runtime where animation does not depend on logic"
 repository = "https://github.com/k4ditano/pleamar"
 
+
+# What pleamar-wm can use of this pleamar (its build.rs reads it): the scene's `desk` slots,
+# `windows … desk N`, for the programs' widgets on the desktop drawn inside the scene.
+[package.metadata.pleamar-wm]
+desk = true
+
 [dependencies]
 arboard = { version = "3.6.1", default-features = false, features = ["wayland-data-control", "image-data"] }
 bytemuck = { version = "1.25.2", features = ["derive"] }
