@@ -3009,6 +3009,12 @@ pub struct Nest {
     /// (`place`, `among`, `rank`, `order`, `on`) until the scene takes it
     /// with `accept win(i)`; meanwhile `win.$i.pending` is true.
     pub manual: bool,
+    /// `desk 4` (experiment, scene-surfaces): that many more slots after the
+    /// windows, `win.$max` on, for the programs' widgets on the desktop
+    /// (layer-shell's bottom level): the compositor hands them to the scene,
+    /// which draws them inside its own picture with `window win.$k`. They are
+    /// not windows: no dock, workspace, layout or focus.
+    pub desk: usize,
 }
 
 /// A program pinned to the dock: the names its windows go by (their app id
@@ -3100,6 +3106,9 @@ pub enum NestEvent {
     /// Buffers of the programs that no longer exist: what the render kept of them goes.
     Forget(Vec<u64>),
     Closed(usize),
+    /// A widget on the desktop in a desk slot: where it is on its monitor, in
+    /// the scene's units, or gone (`open` false).
+    DeskAt { slot: usize, x: f32, y: f32, screen: usize, open: bool },
     Focused(Option<usize>),
     /// The slots in the order the scene lays them out in.
     Order(Vec<usize>),
@@ -3184,6 +3193,8 @@ pub struct DmabufPlane {
 #[derive(Debug)]
 pub enum ToNest {
     Size(i32, i32),
+    /// The slots from `first` on, `count` of them, are the desk's (`windows … desk N`).
+    Desk { first: usize, count: usize },
     /// A program pinned to the dock (true) or unpinned: by its name.
     Pin(String, bool),
     Pointer { slot: usize, x: f64, y: f64 },

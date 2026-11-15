@@ -1138,8 +1138,13 @@ pub fn run(
                     if let Some(n) = &scene.nest {
                         if nest.is_none() {
                             nest = crate::platform::start_nest(n.max, op.to_self.clone());
+                            if n.desk > 0 {
+                                if let Some(send) = &nest {
+                                    send(ToNest::Desk { first: n.max, count: n.desk });
+                                }
+                            }
                         }
-                        nest_windows.resize_with(nest_windows.len().max(n.max), NestWindow::default);
+                        nest_windows.resize_with(nest_windows.len().max(n.max + n.desk), NestWindow::default);
                         for w in &mut nest_windows {
                             for p in &mut w.pieces {
                                 p.uploaded = false;
@@ -1921,6 +1926,15 @@ pub fn run(
                             }
                             nest_fact(&scene, &mut facts, &to_logic, &format!("{name}.{slot}.width"), geometry[2] as f32);
                             nest_fact(&scene, &mut facts, &to_logic, &format!("{name}.{slot}.height"), geometry[3] as f32);
+                        }
+                        NestEvent::DeskAt { slot, x, y, screen, open } => {
+                            nest_fact(&scene, &mut facts, &to_logic, &format!("{name}.{slot}.x"), x);
+                            nest_fact(&scene, &mut facts, &to_logic, &format!("{name}.{slot}.y"), y);
+                            nest_fact(&scene, &mut facts, &to_logic, &format!("{name}.{slot}.screen"), screen as f32);
+                            nest_fact(&scene, &mut facts, &to_logic, &format!("{name}.{slot}.open"), if open { 1.0 } else { 0.0 });
+                            if !open && !nest_closed.contains(&slot) {
+                                nest_closed.push(slot);
+                            }
                         }
                         NestEvent::Closed(slot) => {
                             // Its pool may dry up.
@@ -6330,6 +6344,13 @@ pub fn run(
             }
         }
         let ms = dt * 1000.0;
+        // (Measurement only, `PLEAMAR_BENCH_ROUNDS`: each round's own work, without what it waited, for p95 and max.)
+        {
+            static BENCH: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            if *BENCH.get_or_init(|| std::env::var_os("PLEAMAR_BENCH_ROUNDS").is_some()) && !first_frame {
+                println!("bench · round {:.3} ms", (ms - waited_ms).max(0.0));
+            }
+        }
         // A permanent telltale: any frame that goes over two periods, with its time.
         // Not a frame that waited out a slower pace on purpose (a scene's `rate: 12` at rest, the one
         // paint a second of a surface the compositor is not showing): those filled the log with a

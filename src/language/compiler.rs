@@ -8588,9 +8588,14 @@ impl<'a> Compiler<'a> {
         } else {
             false
         };
+        // `desk 4`: slots for the programs' widgets on the desktop (see `Nest::desk`).
+        let desk = if c.word("desk") { c.num()? as usize } else { 0 };
         c.expect_end()?;
         if self.e.nest.is_some() {
             return Err(CompileError::at(n.line, n.col, "a scene holds one set of windows: this is the second `windows`"));
+        }
+        if desk > 8 {
+            return Err(CompileError::at(n.line, n.col, "`desk` is 8 widgets at most"));
         }
         if !(1..=32).contains(&max) {
             return Err(CompileError::at(n.line, n.col, "`max` is between 1 and 32 windows"));
@@ -8602,7 +8607,12 @@ impl<'a> Compiler<'a> {
             }
             o.facts.insert(full, id);
         };
-        for k in 0..max {
+        for k in 0..max + desk {
+            if k >= max {
+                // A desk slot: where its widget is, and on which monitor.
+                fact(self, format!("{name}.{k}.x"), 0.0, false);
+                fact(self, format!("{name}.{k}.y"), 0.0, false);
+            }
             fact(self, format!("{name}.{k}.open"), 0.0, true);
             fact(self, format!("{name}.{k}.focused"), 0.0, true);
             fact(self, format!("{name}.{k}.width"), 0.0, false);
@@ -8693,7 +8703,7 @@ impl<'a> Compiler<'a> {
         self.e.surface_mut().right_click_quits = false;
         // How many slots there are, as a number known when loading: `let tw[win.max]`.
         self.lets.insert(format!("{name}.max"), Expr::K(max as f32));
-        self.e.nest = Some(crate::scene::Nest { name, max, programs, kept, manual });
+        self.e.nest = Some(crate::scene::Nest { name, max, programs, kept, manual, desk });
         Ok(())
     }
 
@@ -8830,7 +8840,7 @@ impl<'a> Compiler<'a> {
             return Err(CompileError::at(n.line, n.col, "there are no windows here: declare them first, `windows win max 6`"));
         };
         let slot = name.strip_prefix(&format!("{}.", nest.name)).and_then(|k| k.parse::<usize>().ok());
-        let Some(slot) = slot.filter(|k| *k < nest.max) else {
+        let Some(slot) = slot.filter(|k| *k < nest.max + nest.desk) else {
             return Err(CompileError::at(n.line, n.col, format!("'{name}' is not one of the windows: they are {0}.0 to {0}.{1}", nest.name, nest.max - 1)));
         };
         let mut p = self.properties(n, vocab::properties("window"))?;
