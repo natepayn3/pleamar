@@ -214,6 +214,65 @@ struct ShapeMemo {
 pub struct WindowTex {
     pub geometry: [f32; 4],
     pub pieces: Vec<(u32, [f32; 4], [f32; 4], bool)>,
+    /// The windows' texture's size, in texels: a piece's `uv` times this is
+    /// how many pixels of its program's buffer it has (`pixel_snap`).
+    pub dims: (f32, f32),
+}
+
+/// A program's window drawn at its own size —a pixel of its buffer to a pixel
+/// of the screen, give or take 0.2 %, without turning— is put on whole pixels
+/// (docs/pixelsnap.md): its corner moved to a whole pixel (to the nearest
+/// across, and up rather than down, so it never leaves a hairline under a
+/// title bar above it) and its size made exactly its buffer's. A window
+/// between two pixels —a position worked out by a spring, a third of a
+/// monitor— was read halfway between two rows of its pixels and its letters
+/// came out soft. `PLEAMAR_PIXELSNAP=off` leaves it as the scene says.
+///
+/// `b` is the window's box in the scene's units, `scale` how much each of its
+/// buffer's units is drawn (sx, sy), `affine` the scene to the screen and
+/// `texels` how many screen pixels its buffer's first piece is drawn over
+/// against how many pixels it has (drawn width, buffer width, drawn height,
+/// buffer height). The box and scale to draw it with, or None as it was.
+pub fn pixel_snap(b: [f32; 4], scale: (f32, f32), affine: Affine, texels: [f32; 4]) -> Option<([f32; 4], (f32, f32))> {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let on = *ON.get_or_init(|| !matches!(std::env::var("PLEAMAR_PIXELSNAP").ok().as_deref().map(str::trim), Some("off" | "0" | "no" | "false")));
+    if !on {
+        return None;
+    }
+    pixel_snap_with(b, scale, affine, texels)
+}
+
+pub(crate) fn pixel_snap_with(b: [f32; 4], scale: (f32, f32), affine: Affine, texels: [f32; 4]) -> Option<([f32; 4], (f32, f32))> {
+    let m = affine.m;
+    // Turned, sheared or mirrored: left as it is.
+    if m[1].abs() > 1e-4 || m[2].abs() > 1e-4 || m[0] <= 0.0 || m[3] <= 0.0 {
+        return None;
+    }
+    let [dw, bw, dh, bh] = texels;
+    if bw < 1.0 || bh < 1.0 {
+        return None;
+    }
+    // Screen pixels per pixel of its buffer, on each axis.
+    let (kx, ky) = (dw * m[0] / bw, dh * m[3] / bh);
+    if (kx - 1.0).abs() >= 0.002 || (ky - 1.0).abs() >= 0.002 {
+        return None;
+    }
+    let (ox, oy) = affine.apply(b[0], b[1]);
+    let (tx, ty) = ((ox + 0.5).floor(), (oy + 1e-3).floor());
+    // On whole pixels already, give or take what f32 loses on the way (a scale
+    // of 0.9 + 0.1 comes out 0.99999997): left exactly as it was.
+    if (tx - ox).abs() < 1e-3 && (ty - oy).abs() < 1e-3 && (kx - 1.0).abs() < 1e-5 && (ky - 1.0).abs() < 1e-5 {
+        return None;
+    }
+    // Unscaled —the usual, a monitor's copy only moved—: exactly there, so a
+    // window put on whole pixels by the scene itself and one put by this are
+    // the same picture.
+    let moved = if (m[0] - 1.0).abs() < 1e-5 && (m[3] - 1.0).abs() < 1e-5 {
+        [tx - affine.t[0], ty - affine.t[1], b[2], b[3]]
+    } else {
+        [b[0] + (tx - ox) / m[0], b[1] + (ty - oy) / m[3], b[2], b[3]]
+    };
+    Some((moved, (scale.0 / kx, scale.1 / ky)))
 }
 
 /// A piece of a program's window, as `DrawList::window_buffers` keeps it.
@@ -3008,7 +3067,15 @@ impl DrawList {
                     let (ax, ay) = (ask.0.eval(c), ask.1.eval(c));
                     let picture = ax < 0.0 && ay < 0.0;
                     let fit = |box_: f32, asked: f32, real: f32| if asked < 0.0 { box_ / real.max(1.0) } else if asked < 0.5 { 1.0 } else { box_ / asked };
-                    let (sx, sy) = (fit(b[2], ax, g[2]), fit(b[3], ay, g[3]));
+                    let (mut sx, mut sy) = (fit(b[2], ax, g[2]), fit(b[3], ay, g[3]));
+                    // At its own size, on whole pixels (`pixel_snap`): never a picture of it.
+                    let mut b = b;
+                    if let (false, Some((_, uv, r, _))) = (picture, tex.pieces.iter().max_by(|x, y| (x.2[2] * x.2[3]).total_cmp(&(y.2[2] * y.2[3])))) {
+                        let texels = [r[2] * sx, (uv[2] - uv[0]) * tex.dims.0, r[3] * sy, (uv[3] - uv[1]) * tex.dims.1];
+                        if let Some((nb, (nx, ny))) = pixel_snap(b, (sx, sy), affine, texels) {
+                            (b, sx, sy) = (nb, nx, ny);
+                        }
+                    }
                     let d = [b[0], b[1], (g[2] * sx).max(1.0), (g[3] * sy).max(1.0)];
                     // (A picture is not where the mouse reaches the window: the copy
                     // that lays it out is.)
@@ -7128,5 +7195,39 @@ mod element_frame_tests {
         assert_eq!(super::element_frame(small, (40.0, 20.0), &[landscape, turned]), turned);
         // And on the surface alone, to the surface.
         assert_eq!(super::element_frame([5.0, 5.0, 10.0, 10.0], (40.0, 20.0), &[]), [0.0, 0.0, 40.0, 20.0]);
+    }
+}
+
+#[cfg(test)]
+mod pixel_snap_tests {
+    use super::pixel_snap_with as snap;
+    use crate::shapes::Affine;
+
+    #[test]
+    fn a_window_between_two_rows_goes_up_to_a_whole_one_at_its_buffers_size() {
+        // A spring left it at y 129.47 and 730.06 tall; its buffer has 730 rows.
+        let (b, (sx, sy)) = snap([305.0, 129.47, 1180.0, 730.06], (1.0, 730.06 / 730.0), Affine::IDENTITY, [1180.0, 1180.0, 730.06, 730.0]).unwrap();
+        assert_eq!((b[0], b[1]), (305.0, 129.0), "up, not down: no hairline under what is above it");
+        assert!((730.0 * sy - 730.0).abs() < 1e-3 && (1180.0 * sx - 1180.0).abs() < 1e-3);
+        // Across, to the nearest.
+        let (b, _) = snap([10.6, 20.0, 100.0, 50.0], (1.0, 1.0), Affine::IDENTITY, [100.0, 100.0, 50.0, 50.0]).unwrap();
+        assert_eq!((b[0], b[1]), (11.0, 20.0));
+    }
+
+    #[test]
+    fn on_whole_pixels_already_or_not_at_its_size_it_is_left_alone() {
+        assert!(snap([305.0, 129.0, 1180.0, 730.0], (1.0, 1.0), Affine::IDENTITY, [1180.0, 1180.0, 730.0, 730.0]).is_none());
+        // (A scale that f32 leaves a hair under 1: the same.)
+        let hair = Affine::new((0.0, 0.0), 0.0, (0.9 + 0.1, 0.9 + 0.1), (0.0, 0.0));
+        assert!(snap([305.0, 129.0, 1180.0, 730.0], (1.0, 1.0), hair, [1180.0, 1180.0, 730.0, 730.0]).is_none());
+        // Shrunk (an overview), grown, turned: as the scene says.
+        assert!(snap([0.5, 0.5, 590.0, 365.0], (0.5, 0.5), Affine::IDENTITY, [590.0, 1180.0, 365.0, 730.0]).is_none());
+        let turned = Affine::new((0.0, 0.0), 0.3, (1.0, 1.0), (0.0, 0.0));
+        assert!(snap([0.5, 0.5, 100.0, 100.0], (1.0, 1.0), turned, [100.0, 100.0, 100.0, 100.0]).is_none());
+        // A group that halves it, of a buffer twice as big (a scale-2 program): its own size on the screen.
+        let half = Affine::new((0.0, 0.0), 0.0, (0.5, 0.5), (0.0, 0.0));
+        let (b, _) = snap([3.0, 3.0, 200.0, 100.0], (1.0, 1.0), half, [400.0, 200.0, 200.0, 100.0]).unwrap();
+        let (x, y) = half.apply(b[0], b[1]);
+        assert!((x - 2.0).abs() < 1e-4 && (y - 1.0).abs() < 1e-4, "{x} {y}");
     }
 }

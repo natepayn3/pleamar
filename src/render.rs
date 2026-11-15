@@ -4818,7 +4818,7 @@ pub fn run(
                             .collect();
                         (!pieces.is_empty()).then(|| {
                             let g = w.geometry;
-                            crate::gpu::WindowTex { geometry: [g[0] as f32, g[1] as f32, g[2] as f32, g[3] as f32], pieces }
+                            crate::gpu::WindowTex { geometry: [g[0] as f32, g[1] as f32, g[2] as f32, g[3] as f32], pieces, dims: (dw as f32, dh as f32) }
                         })
                     })
                     .collect();
