@@ -4640,6 +4640,25 @@ impl<'a> Compiler<'a> {
     /// `surface { … }` is the scene's window; `surface bar { …; …drawing… }`, one of
     /// several, each one with its own things inside. They all share properties, facts and rules:
     /// inside they are different pieces of the same plane, like the popups.
+    /// A surface put in at `at` (the main one and its copies go first): what was noted of the
+    /// surfaces from there on, to be read at the end, follows them one place down. Left as it was,
+    /// a named surface written before a `screens: each` main one handed its `screens:`, `level:`,
+    /// `keyboard:`… to the main one's copies (#156: the copies all went to the panel's monitor).
+    fn surface_inserted(&mut self, at: usize) {
+        let up = |w: &mut usize| {
+            if *w >= at {
+                *w += 1;
+            }
+        };
+        self.pending_surfaces.iter_mut().for_each(|p| up(&mut p.0));
+        self.pending_levels.iter_mut().for_each(|p| up(&mut p.0));
+        self.pending_reserves.iter_mut().for_each(|p| up(&mut p.0));
+        self.pending_keyboards.iter_mut().for_each(|p| up(&mut p.0));
+        self.pending_rates.iter_mut().for_each(|p| up(&mut p.0));
+        self.pending_anchors.iter_mut().for_each(|p| up(&mut p.0));
+        self.pending_screens.iter_mut().for_each(|p| up(&mut p.0));
+    }
+
     fn surface(&mut self, n: &'a Node) -> R<()> {
         let mut c = Cur::new(&n.head[1..], n.line, n.col);
         let name = match c.peek() {
@@ -4736,6 +4755,7 @@ impl<'a> Compiler<'a> {
         // The main one is the first, whether it has a name or not.
         let fresh = Surface { name: name.clone(), ..Default::default() };
         if name.is_empty() {
+            self.surface_inserted(0);
             self.e.surfaces.insert(0, fresh);
         } else {
             self.next_origin += 10000.0;
@@ -4993,6 +5013,7 @@ impl<'a> Compiler<'a> {
                 }
                 // The main one's copies go together at the start: the first one is still the main one.
                 if base.name.is_empty() {
+                    self.surface_inserted(k);
                     self.e.surfaces.insert(k, copy);
                 } else {
                     self.e.surfaces.push(copy);

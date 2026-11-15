@@ -2391,6 +2391,12 @@ impl PointerHandler for State {
                     }
                 }
                 if let PointerEventKind::Press { serial, .. } = e.kind {
+                    // A press on a copy of `screens: each` is where the person is: its keys and its
+                    // field are that copy's, even if the compositor kept the keyboard on another
+                    // copy that asked for it as well (#156).
+                    if let Some(p) = self.placed.iter().find(|p| p.role.wl() == &e.surface).filter(|p| matches!(self.wanted[p.which].screens, Screens::Number(_))) {
+                        let _ = self.to_render.send(ToRender::KeyboardOn(p.which));
+                    }
                     *pp.last_press.lock().unwrap() = Some((serial, std::time::Instant::now()));
                 }
             }
@@ -2658,7 +2664,15 @@ fn key_name(e: &KeyEvent) -> String {
 }
 
 impl KeyboardHandler for State {
-    fn enter(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wayland_client::protocol::wl_keyboard::WlKeyboard, _: &wl_surface::WlSurface, _: u32, _: &[u32], _: &[Keysym]) {
+    fn enter(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wayland_client::protocol::wl_keyboard::WlKeyboard, surface: &wl_surface::WlSurface, _: u32, _: &[u32], _: &[Keysym]) {
+        // Which surface of the scene it went to: a copy of `screens: each` is one per
+        // monitor, and the keys are that copy's, not always the first's (#156).
+        let which = self.placed.iter().find(|p| p.role.wl() == surface).map(|p| p.which).or_else(|| {
+            LOCKS.get().and_then(|c| c.engaged.lock().unwrap().as_ref().and_then(|ec| ec.faces.iter().find(|k| k.surface.wl_surface() == surface).and_then(|k| k.copy.as_ref().map(|c| c.which))))
+        });
+        if let Some(which) = which {
+            let _ = self.to_render.send(ToRender::KeyboardOn(which));
+        }
         let _ = self.to_render.send(ToRender::KeyboardFocus(true));
     }
     /// Losing the keyboard is, almost always, that someone clicked somewhere else.
