@@ -40,6 +40,14 @@ screen's size— it takes at most 2 × 2, so a picture as big as the screen cost
 
 Both are read when pleamar starts.
 
+Measured on a software card (Mesa's lavapipe, so the times are not a graphics
+card's: compare them with each other), as pleamar's CPU filming 60 frames:
+a picture twice the screen's size drawn over all of it costs about 1 ms more
+a frame; six windows shrunk to an overview (0.29 and 0.14 of their size), about
+1.7 ms more. A whole desktop scene with a wallpaper larger than its screen, 3 to 8 %
+more. If that matters more than the picture on a slow machine,
+`PLEAMAR_MINIFY=off`.
+
 *Possible later*: a property of each image (`smooth: off`) for a scene that
 wants the old sampling in one place only. It would be a change to the
 language, so it is not here yet.
