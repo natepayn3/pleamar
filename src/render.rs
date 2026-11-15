@@ -712,6 +712,10 @@ pub fn run(
     // A surface presented its first frame: the input regions are given again (see `Sheet::presented`).
     let mut regions_again = false;
     let mut nest_changed: Vec<usize> = Vec::new();
+    // A desk slot that came, went or moved (`NestEvent::DeskAt`): what it covers was not drawn in the
+    // round before, so the whole picture is painted again that round (a scene at rest never showed it).
+    let mut desk_moved: Vec<(usize, [f32; 3])> = Vec::new();
+    let mut desk_repaint = false;
     // The windows someone is sharing: each is read back after it draws.
     let mut nest_watch: Vec<(usize, u64, std::sync::mpsc::Sender<crate::scene::WindowPicture>)> = Vec::new();
     let mut nest_watch_due: Vec<usize> = Vec::new();
@@ -1928,11 +1932,28 @@ pub fn run(
                             nest_fact(&scene, &mut facts, &to_logic, &format!("{name}.{slot}.height"), geometry[3] as f32);
                         }
                         NestEvent::DeskAt { slot, x, y, screen, open } => {
+                            let now = [x, y, if open { 1.0 } else { 0.0 }];
+                            let was_open = desk_moved.iter().find(|(s, _)| *s == slot).is_some_and(|(_, w)| w[2] > 0.5);
+                            match desk_moved.iter_mut().find(|(s, _)| *s == slot) {
+                                Some((_, was)) if *was == now => {}
+                                Some((_, was)) => {
+                                    *was = now;
+                                    desk_repaint = true;
+                                }
+                                None => {
+                                    desk_moved.push((slot, now));
+                                    desk_repaint = true;
+                                }
+                            }
                             nest_fact(&scene, &mut facts, &to_logic, &format!("{name}.{slot}.x"), x);
                             nest_fact(&scene, &mut facts, &to_logic, &format!("{name}.{slot}.y"), y);
                             nest_fact(&scene, &mut facts, &to_logic, &format!("{name}.{slot}.screen"), screen as f32);
                             nest_fact(&scene, &mut facts, &to_logic, &format!("{name}.{slot}.open"), if open { 1.0 } else { 0.0 });
-                            if !open && !nest_closed.contains(&slot) {
+                            // Its image goes once it is gone and no longer drawn —not when it first comes
+                            // without one yet: that dropped the first frame of a widget that drew only once—.
+                            if open {
+                                nest_closed.retain(|s| *s != slot);
+                            } else if was_open && !nest_closed.contains(&slot) {
                                 nest_closed.push(slot);
                             }
                         }
@@ -5236,7 +5257,7 @@ pub fn run(
             finger_light = 0.0;
             ripple = None;
         }
-        let all_changed = !known || op.hud || lit.is_none();
+        let all_changed = !known || op.hud || lit.is_none() || std::mem::take(&mut desk_repaint);
         changed.extend(lit.unwrap_or_default());
         // A window that drew something new changes what its box covers, and nothing else.
         for slot in std::mem::take(&mut nest_changed) {
