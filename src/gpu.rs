@@ -1845,7 +1845,10 @@ impl DrawList {
 
     fn sprite(&mut self, d: [f32; 4], uv: [f32; 4], alpha: f32, tint: Option<[f32; 3]>, text: bool, sharp: bool, affine: Affine, clips: &[(usize, [f32; 4])]) {
         let bounds = affine.bounds([d[0], d[1], d[0] + d[2], d[1] + d[3]]);
+        // Letters are laid out at the size they are drawn, and pixel art keeps its pixels.
+        let taps = if text || sharp { 0.0 } else { minify_cap(&bounds) };
         self.element(1.0, [bounds[0] - 1.0, bounds[1] - 1.0, bounds[2] + 1.0, bounds[3] + 1.0], clips, |e| {
+            e[13] = taps;
             affine.encode(&mut e[44..52]);
             e[3] = alpha;
             if let Some(rgb) = tint {
@@ -3023,8 +3026,10 @@ impl DrawList {
                             continue;
                         }
                         let bounds = affine.bounds([x0, y0, x1, y1]);
+                        let taps = minify_cap(&bounds);
                         self.element(1.0, bounds, &clips, |e| {
                             affine.encode(&mut e[44..52]);
+                            e[13] = taps;
                             // −1: from the windows' texture, not the atlas (−2 if its
                             // alpha means nothing); which layer, in the second slot.
                             e[1] = *layer as f32;
@@ -6612,6 +6617,25 @@ impl Sheet {
 
 /// Header, frame history and, at the end, the lens: whether there is a background to show.
 pub const N_UNIFORMS: usize = 8 + 120 + 4 + 4 + 4;
+
+/// How many samples a side an image or a window drawn smaller may take
+/// (`docs/minify.md`; `shape.wgsl`'s `minify_taps` decides how many it needs):
+/// 4, or 2 on an area larger than `PLEAMAR_MINIFY_AREA` screen pixels (a
+/// million by default: a wallpaper twice the screen's size costs 4 samples a
+/// pixel, not 16), or 0 —the one sample of always— with `PLEAMAR_MINIFY=off`.
+fn minify_cap(bounds: &[f32; 4]) -> f32 {
+    static CAP: std::sync::OnceLock<(bool, f32)> = std::sync::OnceLock::new();
+    let (on, area) = *CAP.get_or_init(|| {
+        let on = !matches!(std::env::var("PLEAMAR_MINIFY").ok().as_deref().map(str::trim), Some("off" | "0" | "no" | "false"));
+        let area = std::env::var("PLEAMAR_MINIFY_AREA").ok().and_then(|v| v.trim().parse::<f32>().ok()).filter(|a| *a >= 0.0).unwrap_or(1_000_000.0);
+        (on, area)
+    });
+    if !on {
+        return 0.0;
+    }
+    let covered = (bounds[2] - bounds[0]).max(0.0) * (bounds[3] - bounds[1]).max(0.0);
+    if covered > area { 2.0 } else { 4.0 }
+}
 
 #[cfg(test)]
 mod sole_window_tests {

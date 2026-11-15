@@ -320,6 +320,60 @@ fn sharp_texel(el: Element, at: vec2<f32>) -> vec2<f32> {
     return i + g + 0.5;
 }
 
+/// Drawn smaller than it is: how many texels one screen pixel spans, along
+/// each of the texture's axes (the element's box and its transform, as in
+/// `sharp_texel`). `dims` turns the windows' 0–1 coordinates into texels.
+fn texels_per_pixel(el: Element, dims: vec2<f32>) -> vec2<f32> {
+    let per_local = abs(el.uv.zw - el.uv.xy) * dims / max(el.dest.zw, vec2<f32>(0.0001));
+    return per_local * vec2<f32>(length(el.t0.xz), length(el.t0.yw));
+}
+
+/// How many samples a side when it is drawn smaller (`docs/minify.md`): none
+/// —the one sample of always— until a screen pixel spans more than 1.25
+/// texels (the larger of the two axes: a picture squeezed one way only is
+/// still squeezed), then one bilinear sample for each texel it spans, up to the
+/// element's cap (`color1.y`: 4, 2 on a large area, 0 when it is off).
+fn minify_taps(el: Element, per_px: vec2<f32>) -> i32 {
+    let r = max(per_px.x, per_px.y);
+    if (el.color1.y < 1.5 || el.light.w > 0.5 || r <= 1.25) { return 1; }
+    return i32(min(el.color1.y, clamp(ceil(r), 2.0, 4.0)));
+}
+
+/// The pixel's footprint averaged, n × n bilinear samples spread over it
+/// (as a mip level would hold it, without one), each kept inside the piece
+/// —its own texels, never a neighbour's in the atlas—. `at` and the piece
+/// in texels.
+fn minified(t: texture_2d<f32>, at: vec2<f32>, per_px: vec2<f32>, piece: vec4<f32>, n: i32) -> vec4<f32> {
+    let dims = vec2<f32>(textureDimensions(t));
+    let lo = min(piece.xy, piece.zw) + 0.5;
+    let hi = max(lo, max(piece.xy, piece.zw) - 0.5);
+    var sum = vec4<f32>(0.0);
+    let fn_ = f32(n);
+    for (var j = 0; j < n; j++) {
+        for (var i = 0; i < n; i++) {
+            let off = ((vec2<f32>(f32(i), f32(j)) + 0.5) / fn_ - 0.5) * per_px;
+            sum += textureSampleLevel(t, atlas_sampler, clamp(at + off, lo, hi) / dims, 0.0);
+        }
+    }
+    return sum / (fn_ * fn_);
+}
+
+/// The same for a window, in its layer of the windows' texture.
+fn minified_window(layer: i32, at: vec2<f32>, per_px: vec2<f32>, piece: vec4<f32>, n: i32) -> vec4<f32> {
+    let dims = vec2<f32>(textureDimensions(windows));
+    let lo = min(piece.xy, piece.zw) + 0.5;
+    let hi = max(lo, max(piece.xy, piece.zw) - 0.5);
+    var sum = vec4<f32>(0.0);
+    let fn_ = f32(n);
+    for (var j = 0; j < n; j++) {
+        for (var i = 0; i < n; i++) {
+            let off = ((vec2<f32>(f32(i), f32(j)) + 0.5) / fn_ - 0.5) * per_px;
+            sum += textureSampleLevel(windows, atlas_sampler, clamp(at + off, lo, hi) / dims, layer, 0.0);
+        }
+    }
+    return sum / (fn_ * fn_);
+}
+
 fn rotate_point(p: vec2<f32>, pivot: vec2<f32>, angle: f32) -> vec2<f32> {
     if (angle == 0.0) { return p; }
     let q = p - pivot;
@@ -612,7 +666,15 @@ fn shade(e: VertexOut) -> vec4<f32> {
         if (uv01.x < 0.0 || uv01.x > 1.0 || uv01.y < 0.0 || uv01.y > 1.0) { discard; }
         // Another program's window: its layer of the windows' texture, as it drew it.
         if (el.header.z < -0.5) {
-            let w = textureSampleLevel(windows, atlas_sampler, mix(el.uv.xy, el.uv.zw, uv01), i32(el.header.y), 0.0);
+            let wdims = vec2<f32>(textureDimensions(windows));
+            let wpx = texels_per_pixel(el, wdims);
+            let wn = minify_taps(el, wpx);
+            var w: vec4<f32>;
+            if (wn > 1) {
+                w = minified_window(i32(el.header.y), mix(el.uv.xy, el.uv.zw, uv01) * wdims, wpx, el.uv * vec4<f32>(wdims, wdims), wn);
+            } else {
+                w = textureSampleLevel(windows, atlas_sampler, mix(el.uv.xy, el.uv.zw, uv01), i32(el.header.y), 0.0);
+            }
             // −2: its alpha means nothing (XRGB); it covers.
             if (el.header.z < -1.5) { return vec4<f32>(w.rgb, 1.0) * alpha; }
             return w * alpha;
@@ -625,9 +687,15 @@ fn shade(e: VertexOut) -> vec4<f32> {
             // A letter: its coverage is in its own atlas, which has no colour to read.
             t = vec4<f32>(0.0, 0.0, 0.0, textureSampleLevel(glyphs, atlas_sampler, at / vec2<f32>(textureDimensions(glyphs)), 0.0).r);
         } else if (el.header.y > 0.5) {
-            t = textureSampleLevel(picture, atlas_sampler, at / vec2<f32>(textureDimensions(picture)), 0.0);
+            let ppx = texels_per_pixel(el, vec2<f32>(1.0));
+            let pn = minify_taps(el, ppx);
+            if (pn > 1) { t = minified(picture, at, ppx, el.uv, pn); }
+            else { t = textureSampleLevel(picture, atlas_sampler, at / vec2<f32>(textureDimensions(picture)), 0.0); }
         } else {
-            t = textureSampleLevel(atlas, atlas_sampler, at / vec2<f32>(textureDimensions(atlas)), 0.0);
+            let apx = texels_per_pixel(el, vec2<f32>(1.0));
+            let an = minify_taps(el, apx);
+            if (an > 1) { t = minified(atlas, at, apx, el.uv, an); }
+            else { t = textureSampleLevel(atlas, atlas_sampler, at / vec2<f32>(textureDimensions(atlas)), 0.0); }
         }
         // Tinted: the piece is a mask —a letter (2), a symbolic icon (1)— and the element provides the colour.
         // A letter (2) gets its edges firmed up. Blended as they are, in sRGB,
