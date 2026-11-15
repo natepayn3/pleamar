@@ -445,6 +445,8 @@ value keeps it as a fact, and tells the others with `emit` when it changes.
 | `screen.width` · `screen.height` | what **its** monitor measures |
 | `screens.count` | how many monitors are showing something |
 
+**The keyboard is the copy's whose monitor has it**: its `on key`, `on focus` and `on blur` rules fire, and its `input` is typed into; the other copies' do not (a rule outside the copies hears the keys as ever). The copy is the one the compositor gives the keyboard to, or the one last pressed.
+
 With the scene's surface (the one with no name), what is repeated is the loose drawing. `--screen A,B` spreads the copies across those monitors, which is how two are rehearsed without having two.
 
 Its loose `prop`s and `fact`s, though, are **one for all the copies**: they are not drawing. So what a `follow` follows must not depend on which copy it is —`follow a = screen.index` ends up as the last copy's in every one—; say which monitor shows something in its `show:` instead, which is drawing and is read per copy.
