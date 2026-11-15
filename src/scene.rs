@@ -2941,6 +2941,9 @@ pub enum ToRender {
     KeyReleased(String, u32),
     /// The surface has gained or lost the keyboard.
     KeyboardFocus(bool),
+    /// Which of the scene's surfaces the keyboard went to (`Surface` index): with
+    /// `screens: each`, the copy on the monitor that has it takes the keys (#156).
+    KeyboardOn(usize),
     /// Put the text cursor in a field, or take it away from wherever it is.
     FocusField(Option<&'static str>),
     /// How this user's keys repeat: after how many ms it starts and every how many

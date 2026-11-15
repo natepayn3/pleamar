@@ -760,6 +760,9 @@ pub fn run(
     let mut prof_t = crate::clock::now();
     let mut prof_since = crate::clock::now();
     let mut prof_window_frames = 0u32;
+    // The surface the keyboard was last given to (`ToRender::KeyboardOn`): of the copies of a
+    // `screens: each`, only that one's key rules fire and its field is typed into (#156).
+    let mut key_surface: Option<usize> = None;
     let mut prof_painted = 0u32;
     let mut prof_awake = [0u32; 8];
     // The thread's CPU outside the sections: taking what has arrived, at the
@@ -1687,6 +1690,7 @@ pub fn run(
                     // presses of this round, which may include its own.
                     key_releases.push((name, code));
                 }
+                ToRender::KeyboardOn(which) => key_surface = Some(which),
                 ToRender::KeyboardFocus(yes) => {
                     focus_changes.push(yes);
                     for l in &sheets {
@@ -2512,11 +2516,15 @@ pub fn run(
                 // find box— took them instead, and what was typed went nowhere until the terminal was clicked.)
                 let terminal_keys = crate::terminal::with(|r| r.focus.is_some_and(|f| draw.terminals.iter().any(|t| t.name == f)));
                 if editing.is_none() && scene.nest.is_none() && !terminal_keys {
-                    let exclusive: Vec<[f32; 4]> = sheets
+                    let asking: Vec<(usize, [f32; 4])> = sheets
                         .iter()
                         .filter(|l| (l.open || l.view.popup.is_some()) && l.keyboard_mode == Some(Keyboard::Always))
-                        .map(|l| l.view.bounds())
+                        .map(|l| (l.view.surface, l.view.bounds()))
                         .collect();
+                    // Of several that ask (the copies of a `screens: each`), the one the keyboard
+                    // went to: its own field, not the first copy's (#156).
+                    let theirs = key_surface.filter(|ks| asking.iter().any(|(s, _)| s == ks));
+                    let exclusive: Vec<[f32; 4]> = asking.iter().filter(|(s, _)| theirs.is_none_or(|ks| *s == ks)).map(|(_, b)| *b).collect();
                     let on_exclusive = |f: &&crate::gpu::PlacedField| {
                         exclusive.is_empty()
                             || scene.zones.iter().filter(|z| z.id == f.zone).filter_map(|z| z.bounds(Ctx { props: &props, facts: &facts, seen: None })).any(|b| exclusive.iter().any(|v| b[0] < v[2] && b[2] > v[0] && b[1] < v[3] && b[3] > v[1]))
@@ -3437,6 +3445,19 @@ pub fn run(
             1 => &mut rule_index.awake_quiet,
             _ => &mut rule_index.awake_always,
         });
+        // The rules of the copies of a `screens: each` that do not have the keyboard: their
+        // keys, focus and blur are the copy's that has it (#156). (Not the scene's own rules,
+        // nor any while no copy has it.)
+        let key_away: Vec<std::ops::Range<usize>> = match key_surface.and_then(|ks| scene.surfaces.get(ks).map(|s| (ks, s))) {
+            Some((ks, kept)) if matches!(kept.screens, crate::scene::Screens::Number(_)) => scene
+                .spans
+                .iter()
+                .filter(|t| t.surface != ks && scene.surfaces.get(t.surface).is_some_and(|s| s.name == kept.name && matches!(s.screens, crate::scene::Screens::Number(_))))
+                .map(|t| t.rules.clone())
+                .collect(),
+            _ => Vec::new(),
+        };
+        let keys_here = |k: usize| !key_away.iter().any(|r| r.contains(&k));
         {
             let c = Ctx { props: &props, facts: &facts, seen: None };
             let mut acted: Vec<usize> = Vec::new();
@@ -3533,11 +3554,11 @@ pub fn run(
                             None => false,
                         }
                     }
-                    Trigger::Key(t) => keys.iter().any(|x| x == t),
-                    Trigger::KeyUp(t) => keys_up.iter().any(|x| x == t),
+                    Trigger::Key(t) => keys_here(k) && keys.iter().any(|x| x == t),
+                    Trigger::KeyUp(t) => keys_here(k) && keys_up.iter().any(|x| x == t),
                     Trigger::Submit(t) => submitted.contains(&(t.0 as usize)),
-                    Trigger::FocusGained => focus_changes.contains(&true),
-                    Trigger::FocusLost => focus_changes.contains(&false),
+                    Trigger::FocusGained => keys_here(k) && focus_changes.contains(&true),
+                    Trigger::FocusLost => keys_here(k) && focus_changes.contains(&false),
                     Trigger::Receive(z) => !drops.is_empty() && inside[z.0 as usize],
                     Trigger::Carry(z) => carried_now == Some(z.0 as usize),
                     Trigger::Above { zone, also, duration } => {
