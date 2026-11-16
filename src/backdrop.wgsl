@@ -53,7 +53,7 @@ fn unmix_at(pos: vec2<f32>) -> Unmixed {
     let a = textureLoad(previous, px, 0);
     let remaining = 1.0 - s.a;
     // Under our opaque parts —a text, an icon— nothing can be seen: it is
-    // marked as unknown (alpha 0), and the frosting fills it with what is
+    // marked as unknown (alpha 0), and `fill.wgsl` fills it with what is
     // around. Keeping the last one seen left it stale forever.
     if (remaining < 0.03) {
         return Unmixed(vec4<f32>(0.0), any(abs(f - s.rgb) > vec3<f32>(0.1)));
@@ -66,7 +66,16 @@ fn unmix_at(pos: vec2<f32>) -> Unmixed {
     if (any(background < vec3<f32>(-margin)) || any(background > vec3<f32>(1.0 + margin))) {
         return Unmixed(a, true);
     }
-    return Unmixed(vec4<f32>(clamp(background, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0), false);
+    // How far it can be trusted: dividing by what remains multiplies the
+    // capture's rounding by as much, so along the edge of something opaque
+    // —a card on the glass, where what remains runs from a glass's 12 % down
+    // to nothing— the background came out as a ring of wrong colours that
+    // passed for known, and a glass that looks a little to one side (a
+    // `dome:`) showed it as an outline round the card. There it is known only
+    // in part, and `fill.wgsl` takes the rest from round it. (Premultiplied,
+    // like everything the frosting reads; what is known is alpha 1.)
+    let sure = smoothstep(0.03, 0.09, remaining);
+    return Unmixed(vec4<f32>(clamp(background, vec3<f32>(0.0), vec3<f32>(1.0)) * sure, sure), false);
 }
 
 @fragment
@@ -90,6 +99,7 @@ fn own_over(e: VertexOut) -> @location(0) vec4<f32> {
     let px = vec2<i32>(e.pos.xy);
     let ours = textureLoad(capture, px, 0);
     let behind = textureLoad(canvas, px, 0);
-    return ours + (1.0 - ours.a) * vec4<f32>(behind.rgb * behind.a, behind.a);
+    // (the background is premultiplied: see `unmix_at`)
+    return ours + (1.0 - ours.a) * behind;
 }
 

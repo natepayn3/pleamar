@@ -27,6 +27,12 @@ pub struct Pipelines {
     own: wgpu::RenderPipeline,
     own_over: wgpu::RenderPipeline,
     linear: wgpu::Sampler,
+    /// Filling the background's holes before it is frosted (`fill.wgsl`): down, the smallest level, up (into the
+    /// levels, in `crate::blur::FORMAT`), and the last step up, into the filled background (8 bits, as the background).
+    fill_down: wgpu::RenderPipeline,
+    fill_top: wgpu::RenderPipeline,
+    fill_pull: wgpu::RenderPipeline,
+    fill_last: wgpu::RenderPipeline,
 }
 
 impl Pipelines {
@@ -90,12 +96,35 @@ impl Pipelines {
                 }
             }
         };
+        let fill = d.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("fill"), source: wgpu::ShaderSource::Wgsl(include_str!("fill.wgsl").into()) });
+        let fill_to = |fs: &str, format: wgpu::TextureFormat| {
+            d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(fs),
+                layout: None,
+                vertex: wgpu::VertexState { module: &fill, entry_point: Some("vs"), compilation_options: Default::default(), buffers: &[] },
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &fill,
+                    entry_point: Some(fs),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState { format, blend: None, write_mask: wgpu::ColorWrites::ALL })],
+                }),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
         Pipelines {
             unmix: pipeline("unmix"),
             checked,
             own: pipeline("own"),
             own_over: pipeline("own_over"),
             linear,
+            fill_down: fill_to("down", crate::blur::FORMAT),
+            fill_top: fill_to("top", crate::blur::FORMAT),
+            fill_pull: fill_to("pull", crate::blur::FORMAT),
+            fill_last: fill_to("pull", wgpu::TextureFormat::Rgba8Unorm),
         }
     }
 }
@@ -149,6 +178,8 @@ pub struct Lens {
     /// (one pair of counts per part), and the canvas it was judged against, kept as a picture; which capture.
     judging: Option<Judging>,
     frost: Frost,
+    /// The background with its holes filled, which is what gets frosted (see `Fill`).
+    fill: Fill,
     /// A sample of the last capture, and of which box it was: so as not to
     /// repeat the work if nothing has changed.
     sample: Vec<u8>,
@@ -208,6 +239,7 @@ impl Lens {
             verdict: d.create_buffer(&wgpu::BufferDescriptor { label: Some("verdict"), size: 8, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false }),
             judging: None,
             frost: Frost::new(d, px, b),
+            fill: Fill::new(d, px),
             sample: Vec::new(),
             confirmed: false,
             ours_now: Some(Vec::new()),
@@ -571,8 +603,10 @@ impl Lens {
                 None => pass(enc, &t.unmix, &self.backgrounds[new].1, &unmixing(&t.unmix.get_bind_group_layout(0), None), scissor),
             }
         }
+        // The holes filled (all of it at once: what fills a hole can come from anywhere round it), then frosted.
+        self.fill.run(g, t, enc, &self.backgrounds[new].1);
         for &scissor in &scissors {
-            self.frost.run(g, enc, &self.backgrounds[new].1, scissor, scale);
+            self.frost.run(g, enc, &self.fill.filled.1, scissor, scale);
         }
         self.current = new;
         if t.checked.is_some() {
@@ -795,6 +829,65 @@ fn pass(enc: &mut wgpu::CommandEncoder, pipeline: &wgpu::RenderPipeline, target:
     p.set_bind_group(0, group, &[]);
     p.set_scissor_rect(scissor.0, scissor.1, scissor.2, scissor.3);
     p.draw(0..3, 0..1);
+}
+
+/// The background with nothing unknown in it, for the frosting (`fill.wgsl`): the levels it is averaged down to (from half its size to a few
+/// pixels), the same levels filled on the way back up, and the filled background itself, at its size.
+struct Fill {
+    down: Vec<(wgpu::Texture, wgpu::TextureView)>,
+    up: Vec<(wgpu::Texture, wgpu::TextureView)>,
+    filled: (wgpu::Texture, wgpu::TextureView),
+}
+
+impl Fill {
+    fn new(d: &wgpu::Device, px: (u32, u32)) -> Fill {
+        use wgpu::TextureUsages as U;
+        let (mut w, mut h) = px;
+        let mut down = Vec::new();
+        let mut up = Vec::new();
+        while w > 2 || h > 2 {
+            w = w.div_ceil(2).max(1);
+            h = h.div_ceil(2).max(1);
+            down.push(texture(d, "fill down", (w, h), crate::blur::FORMAT, U::RENDER_ATTACHMENT | U::TEXTURE_BINDING));
+            up.push(texture(d, "fill up", (w, h), crate::blur::FORMAT, U::RENDER_ATTACHMENT | U::TEXTURE_BINDING));
+        }
+        let filled = texture(d, "filled", px, wgpu::TextureFormat::Rgba8Unorm, U::RENDER_ATTACHMENT | U::TEXTURE_BINDING);
+        Fill { down, up, filled }
+    }
+
+    /// Fills `background`'s holes into `filled`: down to the smallest level, then back up.
+    fn run(&self, g: &crate::gpu::Gpu, t: &Pipelines, enc: &mut wgpu::CommandEncoder, background: &wgpu::TextureView) {
+        let dev = &g.device;
+        let whole = |v: &wgpu::TextureView| (0, 0, v.texture().width(), v.texture().height());
+        let one = |p: &wgpu::RenderPipeline, src: &wgpu::TextureView| {
+            dev.create_bind_group(&wgpu::BindGroupDescriptor { label: None, layout: &p.get_bind_group_layout(0), entries: &[wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(src) }] })
+        };
+        let two = |p: &wgpu::RenderPipeline, src: &wgpu::TextureView, coarse: &wgpu::TextureView| {
+            dev.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: None,
+                layout: &p.get_bind_group_layout(0),
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(src) },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(coarse) },
+                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&t.linear) },
+                ],
+            })
+        };
+        let Some(last) = self.down.len().checked_sub(1) else {
+            // (a background of two pixels or less: nothing to average, and nothing is filled)
+            return;
+        };
+        let mut prev = background;
+        for level in &self.down {
+            pass(enc, &t.fill_down, &level.1, &one(&t.fill_down, prev), whole(&level.1));
+            prev = &level.1;
+        }
+        pass(enc, &t.fill_top, &self.up[last].1, &one(&t.fill_top, &self.down[last].1), whole(&self.up[last].1));
+        for k in (0..last).rev() {
+            pass(enc, &t.fill_pull, &self.up[k].1, &two(&t.fill_pull, &self.down[k].1, &self.up[k + 1].1), whole(&self.up[k].1));
+        }
+        pass(enc, &t.fill_last, &self.filled.1, &two(&t.fill_last, background, &self.up[0].1), whole(&self.filled.1));
+    }
 }
 
 /// The frosting's pictures, one per pass of the scene's blur (`blur.rs`),
