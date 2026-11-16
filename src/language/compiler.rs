@@ -6064,6 +6064,9 @@ impl<'a> Compiler<'a> {
             }
             s.frameless = v == "none";
         }
+        if s.window.is_some() && s.width == 0 {
+            return Err(CompileError::at(n.line, n.col, "a window says how wide it is: `full` is for a panel, which is as wide as its monitor"));
+        }
         if let Some(c) = p.get_mut("min_size") {
             // The smallest it can be stretched down to. Without it, that is the
             // size it opens at.
@@ -6082,9 +6085,6 @@ impl<'a> Compiler<'a> {
                 return Err(CompileError::at(n.line, n.col, format!("a min_size is no bigger than the size the window opens at ({}, {})", s.width, s.height)));
             }
             s.min_size = Some((w, h));
-        }
-        if s.window.is_some() && s.width == 0 {
-            return Err(CompileError::at(n.line, n.col, "a window says how wide it is: `full` is for a panel, which is as wide as its monitor"));
         }
         if let Some(c) = p.get_mut("keyboard") {
             s.keyboard = match c.one_of(vocab::KEYBOARD_MODES, "how the keyboard is asked for")?.as_str() {

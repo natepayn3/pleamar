@@ -1,0 +1,5 @@
+// expect: error «a window says how wide it is»
+// `size: full` in a window is told first: the clearer error, not that of `min_size`.
+scene Notes {
+    surface { size: full, 300; kind: window; title: "Notes"; min_size: 420, 300 }
+}
