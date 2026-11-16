@@ -1751,4 +1751,66 @@ mod fill_tests {
         let (l, rr) = (at(50, 35), at(80, 35));
         assert!(l[2] > rr[2] && rr[0] > l[0], "left of the hole {l:?}, right {rr:?}");
     }
+
+    /// What the filling costs on a real card, per capture, for a 1920 × 1080 surface: the box as big as the surface
+    /// (what the first version of #158 did on every capture, with or without a dome) and as big as a settings
+    /// panel (900 × 700); and its pictures' memory. `cargo test --lib -- --ignored fill_cost --nocapture`.
+    #[test]
+    #[ignore = "measures on a real graphics card; run with --ignored"]
+    fn fill_cost_on_the_card() {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default())).expect("a card");
+        let (d, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).expect("a device");
+        println!("fill_cost · {}", adapter.get_info().name);
+        let t = Pipelines::new(&d);
+        let px = (1920u32, 1080u32);
+        let usage = wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::COPY_DST;
+        let backgrounds = [texture(&d, "background", px, wgpu::TextureFormat::Rgba8Unorm, usage), texture(&d, "background", px, wgpu::TextureFormat::Rgba8Unorm, usage)];
+        let wait = || d.poll(wgpu::PollType::Wait { submission_index: None, timeout: Some(std::time::Duration::from_secs(60)) }).expect("the card answers");
+        for (what, r) in [("the whole surface", (0, 0, 1920, 1080)), ("a 900 x 700 panel", (510, 190, 900, 700))] {
+            let mut fill = Fill::new(&d, &t, px, (r.2, r.3), [&backgrounds[0].1, &backgrounds[1].1]);
+            let bytes: u64 = fill.down.iter().chain(&fill.up).map(|l| l.0.width() as u64 * l.0.height() as u64 * 8).sum::<u64>() + px.0 as u64 * px.1 as u64 * 4;
+            // A capture of part of the box: the box stays, only that part is copied again.
+            let parts = [(r.0, r.1, r.2.min(400), r.3.min(300))];
+            let mut run = |n: usize, groups_each_time: bool| -> (f64, f64) {
+                let start = std::time::Instant::now();
+                let mut encode = 0.0;
+                for _ in 0..n {
+                    let e0 = std::time::Instant::now();
+                    let mut enc = d.create_command_encoder(&Default::default());
+                    if groups_each_time {
+                        // As the first version: a bind group for every step made again on every capture.
+                        for k in 0..fill.down.len() * 2 + 1 {
+                            let v = &fill.down[k % fill.down.len()].1;
+                            let _ = d.create_bind_group(&wgpu::BindGroupDescriptor { label: None, layout: &t.fill_down.get_bind_group_layout(0), entries: &[wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(v) }] });
+                        }
+                    }
+                    fill.run(&queue, &t, &mut enc, &backgrounds[1].0, 1, r, &parts);
+                    let cb = enc.finish();
+                    encode += e0.elapsed().as_secs_f64();
+                    queue.submit([cb]);
+                    wait();
+                }
+                (start.elapsed().as_secs_f64() * 1000.0 / n as f64, encode * 1000.0 / n as f64)
+            };
+            run(10, false);
+            let (each, cpu) = run(200, false);
+            println!("fill_cost · {what}: {each:.3} ms a capture (submitted and waited for), of which {cpu:.3} ms on the CPU · {:.1} MB of card memory", bytes as f64 / 1e6);
+            if r.2 == 1920 {
+                let (_, cpu) = run(50, true);
+                println!("fill_cost · {what}, with its bind groups made on every capture: {cpu:.3} ms on the CPU");
+            }
+        }
+        let mut enc = d.create_command_encoder(&Default::default());
+        enc.copy_texture_to_texture(backgrounds[1].0.as_image_copy(), backgrounds[0].0.as_image_copy(), wgpu::Extent3d { width: px.0, height: px.1, depth_or_array_layers: 1 });
+        let start = std::time::Instant::now();
+        for _ in 0..200 {
+            let mut enc = d.create_command_encoder(&Default::default());
+            enc.copy_texture_to_texture(backgrounds[1].0.as_image_copy(), backgrounds[0].0.as_image_copy(), wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 });
+            queue.submit([enc.finish()]);
+            wait();
+        }
+        println!("fill_cost · an empty submission, to subtract: {:.3} ms", start.elapsed().as_secs_f64() * 1000.0 / 200.0);
+        drop(enc);
+    }
 }
