@@ -5154,6 +5154,17 @@ pub fn run(
             }).collect();
         }
         for (k, sup) in scene.surfaces.iter().enumerate() {
+            // A copy for a list of monitors (#150): on monitor k, if the list names it.
+            if let Some(t) = sup.on_list {
+                let here = scene.texts.iter().position(|x| x.0 == format!("screen.{}.name", sup.instance)).and_then(|i| texts.get(i)).filter(|n| !n.is_empty());
+                let listed = crate::scene::monitor_names(texts.get(t.0 as usize).map(String::as_str).unwrap_or(""));
+                let wants = here.filter(|n| listed.iter().any(|l| l == *n)).cloned().unwrap_or_default();
+                if screens_set[k].as_deref() != Some(wants.as_str()) {
+                    crate::platform::rescreen(k, &wants);
+                    screens_set[k] = Some(wants);
+                }
+                continue;
+            }
             let Some(t) = sup.screens_from else { continue };
             let wants = crate::scene::monitor_names(texts.get(t.0 as usize).map(String::as_str).unwrap_or("")).join(", ");
             if screens_set[k].as_deref() != Some(wants.as_str()) {

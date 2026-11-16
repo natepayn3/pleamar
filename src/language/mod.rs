@@ -840,6 +840,44 @@ mod tests {
     }
 
     #[test]
+    fn a_surface_on_a_list_of_monitors_is_a_copy_per_monitor() {
+        // #150: `screens: each in lst` (a text listing monitors) or `each in` two names in quotes, beside a
+        // scene surface with `screens: each max 3`: three copies each, copy k on monitor k while the list
+        // names it, each with its own `screen.index`. One surface on both drew one picture for them, `idx 0`.
+        use crate::scene::Screens;
+        let (scene, _) = super::read_file(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/screens-list-each.plm")).unwrap();
+        for (name, list) in [("dk", "lst"), ("pair", "pair·screens")] {
+            let copies: Vec<&crate::scene::Surface> = scene.surfaces.iter().filter(|s| s.name == name).collect();
+            assert_eq!(copies.iter().map(|s| s.instance).collect::<Vec<_>>(), [0, 1, 2], "{name}: one copy per copy of the scene's");
+            for s in &copies {
+                assert_eq!(s.screens, Screens::Number(s.instance), "{name}: copy {} is monitor {}'s", s.instance, s.instance);
+                let t = s.on_list.unwrap_or_else(|| panic!("{name}: copy {} follows its list", s.instance));
+                assert_eq!(scene.texts[t.0 as usize].0, list);
+            }
+        }
+        let t = scene.surfaces.iter().find(|s| s.name == "pair").and_then(|s| s.on_list).unwrap();
+        assert_eq!(scene.texts[t.0 as usize].1, "DP-1, DP-2");
+        // Each copy's text reads its own monitor's number: three different facts, `screen.0.index`… .
+        let indices: std::collections::HashSet<String> = scene.facts.iter().map(|f| f.0).filter(|n| n.starts_with("screen.") && n.ends_with(".index")).map(str::to_owned).collect();
+        assert!((0..3).all(|k| indices.contains(&format!("screen.{k}.index"))), "{indices:?}");
+        // `screens: lst` alone is one surface on every monitor the list names, as before.
+        let plain: Vec<_> = scene.surfaces.iter().filter(|s| s.name == "plain").collect();
+        assert_eq!(plain.len(), 1);
+        assert!(plain[0].on_list.is_none() && plain[0].screens_from.is_some());
+        // One name is one monitor, as before: not unfolded.
+        let alone: Vec<_> = scene.surfaces.iter().filter(|s| s.name == "alone").collect();
+        assert_eq!(alone.len(), 1);
+        assert_eq!(alone[0].screens, Screens::Named(vec!["DP-1".into()]));
+        assert!(alone[0].on_list.is_none());
+        // Without a scene surface with `screens: each` a list is as before: one surface, on every monitor it names.
+        let (scene, _) = super::read_file(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/screens-list-without-each.plm")).unwrap();
+        let dk: Vec<_> = scene.surfaces.iter().filter(|s| s.name == "dk").collect();
+        assert_eq!(dk.len(), 1);
+        assert_eq!(dk[0].screens, Screens::Named(vec!["HDMI-A-2".into(), "HDMI-A-1".into()]));
+        assert!(dk[0].on_list.is_none() && dk[0].screens_from.is_some());
+    }
+
+    #[test]
     fn each_scene_brought_in_reads_its_own_monitor_text_and_zones() {
         // Issue 144: `screens: mon` in two scenes brought in, each its own `mon`.
         let (scene, _) = super::read_file(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/brought-monitor-text.plm")).unwrap();

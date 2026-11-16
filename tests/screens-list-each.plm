@@ -1,0 +1,25 @@
+// expect: ok
+// #150: `screens: each in lst` (a text listing monitors, or names in quotes): a copy per copy of the
+// scene's `screens: each` surface, copy k on monitor k while the list names it, reading its own
+// `screen.index`. `screens: "DP-1"` (or a text) alone is one surface, as before.
+scene ScreensList {
+    surface { size: 1, 1; anchor: top_left; level: background; screens: each max 3 }
+    text lst = "HDMI-A-2,HDMI-A-1"
+    surface dk {
+        size: 300, 60; anchor: bottom_right; level: overlay; screens: each in lst
+        box { from: 0, 0; size: 300, 60; color: #000000 }
+        text "idx {screen.index}" { at: 10, 30; anchor: left center; size: 16; color: #ffffff }
+    }
+    surface pair {
+        size: 200, 40; anchor: top_right; screens: each in "DP-1", "DP-2"
+        text "{screen.index}" { at: 10, 20; size: 14; color: #ffffff }
+    }
+    surface alone {
+        size: 200, 40; anchor: top_left; screens: "DP-1"
+        text "{screen.index}" { at: 10, 20; size: 14; color: #ffffff }
+    }
+    surface plain {
+        size: 200, 40; anchor: top; screens: lst
+        text "{screen.index}" { at: 10, 20; size: 14; color: #ffffff }
+    }
+}

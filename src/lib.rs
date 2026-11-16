@@ -340,7 +340,45 @@ pub fn stay_on_update() {
 
 /// The program: reads the command line and runs what it asks for.
 pub fn run() {
+    // Before anything starts a thread: an arena is made the first time a thread allocates.
+    malloc_arenas();
     run_with(std::env::args().skip(1).collect());
+}
+
+/// How many arenas glibc's malloc keeps when nobody says (#153): see `malloc_arenas`. 0, as glibc
+/// would have it: one arena, measured on Vitreus with a real card, kept the same memory and cost more CPU.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+const MALLOC_ARENAS: i32 = 0;
+
+/// glibc's malloc gives each thread that allocates an arena of its own, up to eight per core, and
+/// what one frees is kept there for that thread. A small menu that opened 17 pages and was reloaded
+/// three times went from 110 to 151 MB, and to 130 with one arena (#153, measured filming on an
+/// Intel UHD 620). `PLEAMAR_MALLOC_ARENAS=n` says how many (`0`: as glibc would have it, which is
+/// what pleamar does when nobody says: see `MALLOC_ARENAS`); without it, `MALLOC_ARENA_MAX` or
+/// `GLIBC_TUNABLES=glibc.malloc.arena_max=…`, if the person set either, are left as they are.
+/// Elsewhere (another libc, another system), nothing.
+fn malloc_arenas() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        let n = match std::env::var("PLEAMAR_MALLOC_ARENAS") {
+            Ok(v) => match v.trim().parse::<i32>() {
+                Ok(n) if n >= 0 => n,
+                _ => {
+                    eprintln!("pleamar · PLEAMAR_MALLOC_ARENAS={v} is not a number of arenas (0 leaves malloc as it is): left as it is");
+                    0
+                }
+            },
+            Err(_) => {
+                let said = std::env::var_os("MALLOC_ARENA_MAX").is_some_and(|v| !v.is_empty())
+                    || std::env::var("GLIBC_TUNABLES").is_ok_and(|t| t.contains("glibc.malloc.arena_max"));
+                if said { 0 } else { MALLOC_ARENAS }
+            }
+        };
+        if n > 0 {
+            // SAFETY: no other thread exists yet, and `mallopt` only sets one of malloc's parameters.
+            unsafe { libc::mallopt(libc::M_ARENA_MAX, n) };
+        }
+    }
 }
 
 /// The same, with the options given instead of the command line's.
@@ -450,7 +488,12 @@ pub fn run_with(options: Vec<String>) {
         flags = wgpu::InstanceFlags::VALIDATION | wgpu::InstanceFlags::DEBUG;
     }
     let instance = graphics_instance(flags);
-    let wanted = scene.surfaces.clone();
+    // A copy for a list of monitors (#150) starts on none: the render says where, once it knows
+    // which monitor is which, and it never shows a moment where the list does not name it.
+    let wanted: Vec<_> = scene.surfaces.iter().map(|s| match s.on_list {
+        Some(_) => scene::Surface { screens: scene::Screens::Named(Vec::new()), ..s.clone() },
+        None => s.clone(),
+    }).collect();
     // Filmed: no screen, the clock virtual, no waiting for anything.
     if let Some(out) = &a.film {
         if let Err(e) = platform::film::start(out, a.fps, a.mouse.as_deref(), a.seconds) {

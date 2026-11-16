@@ -1111,6 +1111,11 @@ pub fn compile<'a>(tree: &'a [Entry], files: &'a [String], dirs: &'a [std::path:
         let first = o.e.texts[t.0 as usize].1.clone();
         let owner_name = o.e.surfaces[which].name.clone();
         for surf in o.e.surfaces.iter_mut().filter(|s| s.name == owner_name) {
+            // `screens: each in lst` (#150): each copy keeps its monitor, and the text says which go.
+            if matches!(surf.screens, Screens::Number(_)) {
+                surf.on_list = Some(t);
+                continue;
+            }
             surf.screens = Screens::Named(crate::scene::monitor_names(&first));
             surf.screens_from = Some(t);
         }
@@ -5895,13 +5900,39 @@ impl<'a> Compiler<'a> {
         let mut p = self.properties(n, vocab::properties("surface"))?;
         // `screens: each [max 4]`: one surface per monitor, each one with its state.
         let mut how_many = None;
+        // A list of monitors written in quotes, kept as a text of its own when it is unfolded (#150).
+        let mut list_text = None;
         if let Some(c) = p.get_mut("screens") {
             if c.word("each") {
-                let limit = if c.word("max") { c.num()? as usize } else { 4 };
-                if !(1..=8).contains(&limit) {
-                    return Err(CompileError::at(n.line, n.col, "`each` takes between 1 and 8 monitors: each one unfolds when loading"));
+                if c.word("in") {
+                    // `screens: each in lst` (a text listing monitors, or names in quotes): a copy per
+                    // monitor as `each` —the scene surface's copy k, on monitor k—, each going only where
+                    // the list names it (#150). `screens: lst` is one surface on every monitor the list
+                    // names: one picture for all of them, and one `screen.index`.
+                    let Some(limit) = self.main_each_max() else {
+                        return Err(CompileError::at(n.line, n.col, "`screens: each in …` makes a copy for each copy of the scene's own surface with `screens: each`, and this scene has none: give the scene's surface `screens: each`, or write `screens:` with the list alone (one surface on all of them)"));
+                    };
+                    if name.is_empty() {
+                        return Err(CompileError::at(n.line, n.col, "`screens: each in …` is for a surface with a name: the scene's own takes `screens: each`"));
+                    }
+                    if matches!(c.peek(), Some(TokenKind::Str(_))) {
+                        let mut names = Vec::new();
+                        while let Ok(v) = c.string() {
+                            names.push(v);
+                            if !c.sym(",") {
+                                break;
+                            }
+                        }
+                        list_text = Some(self.e.live_text(interned(&format!("{name}·screens")), &names.join(", ")));
+                    }
+                    how_many = Some(limit);
+                } else {
+                    let limit = if c.word("max") { c.num()? as usize } else { 4 };
+                    if !(1..=8).contains(&limit) {
+                        return Err(CompileError::at(n.line, n.col, "`each` takes between 1 and 8 monitors: each one unfolds when loading"));
+                    }
+                    how_many = Some(limit);
                 }
-                how_many = Some(limit);
             }
             // It is read again further down, on the surface by then.
             c.i = 0;
@@ -6165,7 +6196,19 @@ impl<'a> Compiler<'a> {
             s.screens = if c.word("all") {
                 Screens::All
             } else if c.word("each") {
-                if c.word("max") {
+                if c.word("in") {
+                    // (`each in`, see above: its list in quotes is a text already, or a text read at the end.)
+                    if matches!(c.peek(), Some(TokenKind::Str(_))) {
+                        while c.string().is_ok() && c.sym(",") {}
+                        c.expect_end()?;
+                        s.on_list = list_text;
+                    } else {
+                        let pos = c.pos();
+                        let word = c.id("the monitors of `each in`: a text that lists them, or names in quotes")?;
+                        c.expect_end()?;
+                        self.pending_screens.push((which, word, pos));
+                    }
+                } else if c.word("max") {
                     let _ = c.num()?;
                 }
                 Screens::Number(0)
@@ -6299,6 +6342,25 @@ impl<'a> Compiler<'a> {
 
     /// The named surfaces of a scene copied per monitor (not a lock, not a window):
     /// each is one surface that goes to the monitors its `screens:` says.
+    /// How many copies the scene's own surface makes, if it says `screens: each [max N]`: looked
+    /// for in what the scene says, as it may be written after the surface being read.
+    fn main_each_max(&self) -> Option<usize> {
+        self.top.iter().find_map(|e| {
+            let Entry::Node(n) = e else { return None };
+            let is_main = n.head.len() == 1 && matches!(n.head.first().map(|t| &t.kind), Some(TokenKind::Id(w)) if w == "surface");
+            if !is_main {
+                return None;
+            }
+            n.body.as_deref().unwrap_or(&[]).iter().find_map(|p| match p {
+                Entry::Prop { name, value, line, col } if name == "screens" => {
+                    let mut c = Cur::new(value, *line, *col);
+                    c.word("each").then(|| if c.word("max") { c.num().map_or(4, |m| m as usize) } else { 4 })
+                }
+                _ => None,
+            })
+        })
+    }
+
     fn beside_copies(&self) -> Vec<String> {
         if !self.e.surfaces.iter().any(|s| s.name.is_empty() && matches!(s.screens, Screens::Number(_))) {
             return Vec::new();
