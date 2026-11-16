@@ -340,7 +340,44 @@ pub fn stay_on_update() {
 
 /// The program: reads the command line and runs what it asks for.
 pub fn run() {
+    // Before anything starts a thread: an arena is made the first time a thread allocates.
+    malloc_arenas();
     run_with(std::env::args().skip(1).collect());
+}
+
+/// How many arenas glibc's malloc keeps when nobody says (#153): see `malloc_arenas`.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+const MALLOC_ARENAS: i32 = 1;
+
+/// glibc's malloc gives each thread that allocates an arena of its own, up to eight per core, and
+/// what one frees is kept there for that thread: the render, the logic and the workshop each kept
+/// their own leftovers, in pieces too small to give back. A bar that opened a few pages and was
+/// reloaded went from 110 to 151 MB, and `malloc_trim` gave back little (#153). With fewer arenas
+/// what one thread frees another uses. `PLEAMAR_MALLOC_ARENAS=n` says how many (`0`: as glibc
+/// would have it); without it, `MALLOC_ARENA_MAX` or `GLIBC_TUNABLES=glibc.malloc.arena_max=…`,
+/// if the person set either, are left as they are. Elsewhere (another libc, another system), nothing.
+fn malloc_arenas() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        let n = match std::env::var("PLEAMAR_MALLOC_ARENAS") {
+            Ok(v) => match v.trim().parse::<i32>() {
+                Ok(n) if n >= 0 => n,
+                _ => {
+                    eprintln!("pleamar · PLEAMAR_MALLOC_ARENAS={v} is not a number of arenas (0 leaves malloc as it is): left as it is");
+                    0
+                }
+            },
+            Err(_) => {
+                let said = std::env::var_os("MALLOC_ARENA_MAX").is_some_and(|v| !v.is_empty())
+                    || std::env::var("GLIBC_TUNABLES").is_ok_and(|t| t.contains("glibc.malloc.arena_max"));
+                if said { 0 } else { MALLOC_ARENAS }
+            }
+        };
+        if n > 0 {
+            // SAFETY: no other thread exists yet, and `mallopt` only sets one of malloc's parameters.
+            unsafe { libc::mallopt(libc::M_ARENA_MAX, n) };
+        }
+    }
 }
 
 /// The same, with the options given instead of the command line's.
