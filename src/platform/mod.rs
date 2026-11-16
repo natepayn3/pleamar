@@ -652,13 +652,39 @@ pub fn listen_for_commands(scene: &str, receive: Commands) {
                 // keep the next order waiting (an agent presses while it watches).
                 let receive = receive.clone();
                 let _ = std::thread::Builder::new().name("command".into()).spawn(move || {
-                    for line in BufReader::new(reader).lines().map_while(Result::ok) {
+                    let mut reader = BufReader::new(reader);
+                    let (mut line, mut held) = (String::new(), None);
+                    loop {
+                        // Nothing else already here to run: whoever else is saying leaves the line free
+                        // before this one waits for more.
+                        if !reader.buffer().contains(&b'\n') {
+                            held = None;
+                        }
+                        line.clear();
+                        if reader.read_line(&mut line).map_or(true, |n| n == 0) {
+                            break;
+                        }
+                        let said = line.trim_end_matches(['\n', '\r']).to_owned();
+                        // Several programs saying `text` and `emit` at once: each one's orders run together,
+                        // not mixed with another's (`--say x "text v a" "emit x"` twice reads `a` and then `b`).
+                        // Only the orders that never wait; `wait`, `watch`, `get`… go without it.
+                        match one_at_a_time(&said) {
+                            true => {
+                                if held.as_ref().is_some_and(|h: &SayTurn| h.late()) {
+                                    held = None;
+                                }
+                                if held.is_none() {
+                                    held = SayTurn::take();
+                                }
+                            }
+                            false => held = None,
+                        }
                         let mut out = |l: &str| match l.is_empty() {
                             true => still_there(&c),
                             false => writeln!(c, "{l}").and_then(|_| c.flush()).is_ok(),
                         };
                         // A question (`get open`) is answered back the way it came.
-                        if let Some(answer) = receive(line, &mut out) {
+                        if let Some(answer) = receive(said, &mut out) {
                             let _ = writeln!(c, "{}", answer.trim_end_matches('\n'));
                         }
                     }
@@ -666,6 +692,40 @@ pub fn listen_for_commands(scene: &str, receive: Commands) {
             }
         })
         .ok();
+}
+
+/// The orders that are only handed over, never waited on.
+#[cfg(unix)]
+fn one_at_a_time(line: &str) -> bool {
+    matches!(line.split_whitespace().next(), Some("text" | "emit" | "fact" | "submit" | "focus"))
+}
+
+/// The turn of whoever is saying such orders: while it is held, no one else's are run between them.
+/// Held for little: it is given up after half a second whatever comes, and who waits for it does
+/// not wait more than two seconds (then goes on without it).
+#[cfg(unix)]
+struct SayTurn {
+    _turn: std::sync::MutexGuard<'static, ()>,
+    since: std::time::Instant,
+}
+#[cfg(unix)]
+static SAY_TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+#[cfg(unix)]
+impl SayTurn {
+    fn take() -> Option<SayTurn> {
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            match SAY_TURN.try_lock() {
+                Ok(g) => return Some(SayTurn { _turn: g, since: std::time::Instant::now() }),
+                Err(std::sync::TryLockError::Poisoned(p)) => return Some(SayTurn { _turn: p.into_inner(), since: std::time::Instant::now() }),
+                Err(std::sync::TryLockError::WouldBlock) if std::time::Instant::now() < until => std::thread::sleep(std::time::Duration::from_micros(200)),
+                Err(_) => return None,
+            }
+        }
+    }
+    fn late(&self) -> bool {
+        self.since.elapsed() > std::time::Duration::from_millis(500)
+    }
 }
 
 /// Whether the other end of a connection, or of a pipe, is still there,

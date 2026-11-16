@@ -113,3 +113,29 @@ fn a_burst_of_text_and_emit_reads_each_its_own_text() {
     assert_eq!(run.get("heard"), want, "`on(\"text:x.v\")` heard each one, in order");
     assert_eq!(out, want, "each `x` read the text of its own call");
 }
+
+#[test]
+#[ignore = "films with a graphics card (software Vulkan on a machine without one); run with --ignored"]
+fn ten_programs_saying_at_once_each_read_their_own_text() {
+    if !has_card() {
+        eprintln!("no graphics card: not filmed");
+        return;
+    }
+    let run = Running::start("say-parallel");
+    // Ten `--say` at the same time, each one `text` and `emit` down its own connection.
+    let vs: Vec<String> = (1..=10).map(|i| format!("p{i:02}")).collect();
+    let mut children: Vec<Child> = vs
+        .iter()
+        .map(|v| pleamar(&run.home).args(["--say", "say-burst"]).arg(format!("text x.v {v}")).arg("emit x").stdout(Stdio::null()).spawn().expect("--say runs"))
+        .collect();
+    for c in &mut children {
+        assert!(c.wait().unwrap().success(), "a --say failed");
+    }
+    let out = run.read("out", |o| o.split('|').count() >= 10);
+    let heard = run.get("heard");
+    // The order they arrive in is the system's; what is asked is that each `x` read what its own call said.
+    assert_eq!(out, heard, "each `x` read the text of its own call, whatever the order");
+    let mut got: Vec<&str> = out.split('|').collect();
+    got.sort_unstable();
+    assert_eq!(got, vs.iter().map(String::as_str).collect::<Vec<_>>(), "all ten, once each");
+}
