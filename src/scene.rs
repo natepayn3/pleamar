@@ -1978,6 +1978,30 @@ impl Scene {
         self.copy_rules.iter().filter(|(k, _)| self.surfaces.get(*k).is_some_and(|s| s.instance != monitor)).map(|(_, r)| r.clone()).collect()
     }
 
+    /// The part of zone `k`'s box that is in sight: cut by the window of every list with
+    /// `view:` it scrolls inside (`Zone::within`, a list in a list too). `None` when
+    /// nothing of it is: a row scrolled out of its list. `bounds` gives each zone's box
+    /// as the caller has it; a list whose box is not known does not cut. The pointer
+    /// presses only inside this part, and `describe` says «off view» when there is none:
+    /// both by the same measure (#157). Before, a row scrolled out was not drawn and
+    /// still took the presses meant for what is above or below the list.
+    pub fn visible_part(&self, k: usize, bounds: impl Fn(usize) -> Option<[f32; 4]>) -> Option<[f32; 4]> {
+        let mut part = bounds(k)?;
+        let mut within = self.zones.get(k)?.within;
+        // A list is never inside itself; the bound only guards a cycle.
+        for _ in 0..self.zones.len() {
+            let Some(l) = within else { break };
+            if let Some(w) = bounds(l.0 as usize) {
+                part = [part[0].max(w[0]), part[1].max(w[1]), part[2].min(w[2]), part[3].min(w[3])];
+                if part[0] >= part[2] || part[1] >= part[3] {
+                    return None;
+                }
+            }
+            within = self.zones[l.0 as usize].within;
+        }
+        Some(part)
+    }
+
     /// The pages (`include … while`) whose condition does not hold now.
     pub fn pages_asleep(&self, c: Ctx) -> Vec<&Page> {
         if self.pages.is_empty() {

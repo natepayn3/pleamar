@@ -1,0 +1,28 @@
+// expect: ok
+// #157 (zoechmann-curd): a button above a list with `view:`; the list scrolled down, the presses
+// on the button are the button's, not those of the rows scrolled out above the list.
+language 0.6
+scene V {
+    surface { size: 300, 400; anchor: bottom_right }
+    fact hit_btn = 0
+    fact hit_card = 0
+    fact hit_x = 0
+    column main { at: 0, 0; gap: 10
+        group { size: 200, 40
+            zone box btn { from: 0, 0; size: 200, 40 }
+            on press btn { hit_btn = hit_btn + 1 }
+        }
+        group { size: 200, 200
+            column lst { at: 0, 0; view: 200, 200; gap: 8
+                repeat k in 0..10 {
+                    group { size: 200, 60
+                        zone box iz.$k { from: 0, 0; size: 200, 60 }
+                        zone box ix.$k { from: 150, 0; size: 50, 30 }
+                    }
+                    on press iz.$k { hit_card = hit_card + 1 }
+                    on press ix.$k { hit_x = hit_x + 1 }
+                }
+            }
+        }
+    }
+}

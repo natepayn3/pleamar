@@ -2712,7 +2712,10 @@ pub fn run(
                 if moved_only {
                     continue;
                 }
-                let is_inside = live && pointer.is_some_and(|(x, y)| in_box(x, y) && z.contains(c, x, y));
+                // A row of a list with `view:`: only where it is in sight. Scrolled out, it
+                // is not drawn and does not take what is pressed above or below the list (#157).
+                let in_sight = |x: f32, y: f32| z.within.is_none() || scene.visible_part(k, |j| zone_memo.bounds[j]).is_some_and(|p| x >= p[0] && x <= p[2] && y >= p[1] && y <= p[3]);
+                let is_inside = live && pointer.is_some_and(|(x, y)| in_box(x, y) && z.contains(c, x, y) && in_sight(x, y));
                 if is_inside != *was_inside {
                     *was_inside = is_inside;
                     edges.push((is_inside, k));

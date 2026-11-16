@@ -312,16 +312,10 @@ pub fn describe(scene: &Scene, c: Ctx, texts: &[String], sight: &Sight) -> Vec<P
             let (x, y) = centre(z);
             inside(b, x, y)
         });
-        // Scrolled out of its list: its centre is not inside the list's window.
-        let off_view = |k: usize| {
-            scene.zones[k].within.is_some_and(|l| match (there[l.0 as usize], there[k]) {
-                (Some(w), Some(z)) => {
-                    let (x, y) = centre(z);
-                    !inside(w, x, y)
-                }
-                _ => false,
-            })
-        };
+        // Scrolled out of its list: nothing of it is in sight, by the same measure the
+        // pointer presses with (#157). By its centre, a button in a corner of a row and
+        // the row itself, at the same place, were said one in view and the other not.
+        let off_view = |k: usize| scene.zones[k].within.is_some() && there[k].is_some() && scene.visible_part(k, |j| there[j]).is_none();
         // What is on this surface, and the rows of its lists that are scrolled out of it.
         let mine: Vec<usize> = (0..scene.zones.len())
             .filter(|k| there[*k].is_some() && (on_this(*k) || scene.zones[*k].within.is_some_and(|l| on_this(l.0 as usize))))
@@ -1663,5 +1657,42 @@ mod tests {
         assert!(follow_asked("0").unwrap().unwrap_err().contains("watch 0 lay."));
         assert!(follow_asked("0 --now").unwrap().is_err());
         assert!(follow_asked("soon lay.").unwrap().unwrap_err().contains("'soon'"));
+    }
+
+    /// #157: a list with `view:` scrolled down. «Off view» is said of a row when nothing of
+    /// it is in sight —the measure the pointer presses with—, a row's button the same as the
+    /// row, and a press on the button above the list finds only the button.
+    #[test]
+    fn off_view_is_what_the_pointer_cannot_press() {
+        let (scene, _) = crate::language::read_file(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/list-view-presses.plm")).unwrap();
+        let mut props: Vec<Animated> = scene.props.iter().map(|(_, v, s)| Animated { x: *v, v: 0.0, target: *v, spring: *s }).collect();
+        let facts: Vec<f32> = scene.facts.iter().map(|f| f.1).collect();
+        let texts: Vec<String> = scene.texts.iter().map(|t| t.1.clone()).collect();
+        let zone = |n: &str| scene.zones.iter().position(|z| z.id == n).unwrap_or_else(|| panic!("no zone {n}"));
+        // Scrolled 300 px: rows 0 to 3 have gone up out of the window (68 px a row), 4 is cut.
+        let scroll = scene.zones.iter().find_map(|z| z.scrolls).expect("the list scrolls");
+        props[scroll.0 as usize].x = 300.0;
+        let c = Ctx { props: &props, facts: &facts, seen: None };
+        let boxes: Vec<Option<[f32; 4]>> = scene.zones.iter().map(|z| if z.active.is_true(c) { z.bounds(c) } else { None }).collect();
+        let shown = scene.surfaces.iter().enumerate().map(|(k, s)| Shown { surface: k, popup: None, bounds: [s.origin.0, s.origin.1, s.origin.0 + s.width as f32, s.origin.1 + s.height as f32], scale: 1.0 }).collect();
+        let never = |_: usize| false;
+        let parts = describe(&scene, c, &texts, &Sight { shown, texts_seen: &[], gone: &never, rank: None, zones: None, index: None, person: false });
+        let off = |n: &str| node(&parts, n).unwrap_or_else(|| panic!("{n} is not told")).off_view;
+        for k in 0..10 {
+            let (card, cross) = (format!("iz.{k}"), format!("ix.{k}"));
+            assert_eq!(off(&card), scene.visible_part(zone(&card), |j| boxes[j]).is_none(), "{card}");
+            assert_eq!(off(&cross), scene.visible_part(zone(&cross), |j| boxes[j]).is_none(), "{cross}");
+            // A row out of sight takes its button with it.
+            assert!(!off(&card) || off(&cross), "{card} off view and {cross} not");
+        }
+        assert!(off("iz.0") && off("ix.3") && !off("iz.5") && !off("btn"));
+        // Where the reporter pressed the button: a row was there before the scroll, and is not in sight now.
+        let (x, y) = (175.0, 15.0);
+        let pressed: Vec<&str> = (0..scene.zones.len())
+            .filter(|&k| boxes[k].is_some_and(|b| x >= b[0] && x <= b[2] && y >= b[1] && y <= b[3]))
+            .filter(|&k| scene.zones[k].within.is_none() || scene.visible_part(k, |j| boxes[j]).is_some_and(|p| x >= p[0] && x <= p[2] && y >= p[1] && y <= p[3]))
+            .map(|k| scene.zones[k].id)
+            .collect();
+        assert_eq!(pressed, ["btn"]);
     }
 }
