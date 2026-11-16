@@ -148,6 +148,9 @@ pub struct Surface {
     /// `.desktop` file is called, so the dock gives it its icon and groups its
     /// windows. Without it, "pleamar", like every other.
     pub app_id: Option<String>,
+    /// The smallest a window lets itself be made (`min_size: 520, 380`).
+    /// Without it, a window is never smaller than the `size:` it opens at.
+    pub min_size: Option<(u32, u32)>,
     /// If it is the lock screen: a surface that does NOT exist until its
     /// `open:` becomes true, and that, once it exists, has the session really
     /// locked —the compositor guarantees it, not the drawing—, on all
@@ -207,7 +210,7 @@ pub enum Keyboard {
 impl Default for Surface {
     fn default() -> Self {
         // Neutral: full width, at the top, on all monitors. Whatever the scene asks for wins.
-        Surface { name: String::new(), instance: 0, origin: (0.0, 0.0), open: None, window: None, app_id: None, lock_screen: false, width: 0, size_props: None, cursor_props: None, height: 40, anchor: SurfaceAnchor::Top, anchor_from: None, level_while: None, margin: [0; 4], level: Level::Above, exclusive_zone: 0, reserve_while: None, max_fps: 0, rate_said: false, rate_while: Vec::new(), screens: Screens::All, screens_from: None, keyboard: Keyboard::Never, keyboard_while: false, keyboard_said: false, keyboard_when: None, right_click_quits: true, hidden_from_captures: false, agent_hidden: false }
+        Surface { name: String::new(), instance: 0, origin: (0.0, 0.0), open: None, window: None, app_id: None, min_size: None, lock_screen: false, width: 0, size_props: None, cursor_props: None, height: 40, anchor: SurfaceAnchor::Top, anchor_from: None, level_while: None, margin: [0; 4], level: Level::Above, exclusive_zone: 0, reserve_while: None, max_fps: 0, rate_said: false, rate_while: Vec::new(), screens: Screens::All, screens_from: None, keyboard: Keyboard::Never, keyboard_while: false, keyboard_said: false, keyboard_when: None, right_click_quits: true, hidden_from_captures: false, agent_hidden: false }
     }
 }
 

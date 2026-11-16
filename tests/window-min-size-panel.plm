@@ -1,0 +1,4 @@
+// expect: error «only a window has a min_size»
+scene Bar {
+    surface { size: full, 40; anchor: top; min_size: 200, 40 }
+}
