@@ -10,13 +10,13 @@ pleamar --check scene.plm      # reads it, with whatever it imports; says whethe
 
 ## 1. Version
 
-The language has a number of its own, apart from the program's: **0.9**. The first changes when something already written stops being valid; the second, when something is added. A file can say which one it needs, on its first line:
+The language has a number of its own, apart from the program's: **0.10**. The first changes when something already written stops being valid; the second, when something is added. A file can say which one it needs, on its first line:
 
 ```
 language 0.1
 ```
 
-If it asks for a different first number, or a second one higher than the program understands, it is an error on load —`this file asks for language 0.99, and this pleamar understands 0.9`— and not a half-built scene. A file that asks for 0.1 is still read by 0.9: what 0.2 added —a group's own `shader:`, workspaces, `pick`, `import … as`, `drag.over`— and what 0.3 added —what a zone tells an agent: `label:`, `agent:`, `role:`, `value:`, `checked:`, `selected:`—, what 0.4 added —a sheet of pictures' `cell:` and `pixels` for pixel art—, and what 0.5 added —a list that sticks to its end (`stick: end`), a child placed on its own across its layout (`place:`), a text as wide as what it says (`tight: true`), a `lines:` that changes, `motion.reduced` and `color.scheme`, a `launch` with holes, a `text` chosen with `if`, and `hover`/`away` over several zones—, and what 0.6 added —a quote inside a text (`\"`), a block opened on the line after its header, and a `let` that is a colour chosen with `pick` or `if`—, what 0.7 added —a terminal drawn by the scene (`terminal`, §10.4)—, what 0.8 added —a window put aside, on no workspace (`send win(k) aside`)—, what 0.9 added —a zone that yields to what is below it (`yields: true`)—, and what 0.10 added —the programs' widgets drawn by the scene (`windows … desk N`)— it simply does not use. Without that line, it is read with whatever is there. While the first is 0, nothing is promised: this is a language still being made.
+If it asks for a different first number, or a second one higher than the program understands, it is an error on load —`this file asks for language 0.99, and this pleamar understands 0.10`— and not a half-built scene. A file that asks for 0.1 is still read by 0.10: what 0.2 added —a group's own `shader:`, workspaces, `pick`, `import … as`, `drag.over`— and what 0.3 added —what a zone tells an agent: `label:`, `agent:`, `role:`, `value:`, `checked:`, `selected:`—, what 0.4 added —a sheet of pictures' `cell:` and `pixels` for pixel art—, and what 0.5 added —a list that sticks to its end (`stick: end`), a child placed on its own across its layout (`place:`), a text as wide as what it says (`tight: true`), a `lines:` that changes, `motion.reduced` and `color.scheme`, a `launch` with holes, a `text` chosen with `if`, and `hover`/`away` over several zones—, and what 0.6 added —a quote inside a text (`\"`), a block opened on the line after its header, and a `let` that is a colour chosen with `pick` or `if`—, what 0.7 added —a terminal drawn by the scene (`terminal`, §10.4)—, what 0.8 added —a window put aside, on no workspace (`send win(k) aside`)—, what 0.9 added —a zone that yields to what is below it (`yields: true`)—, and what 0.10 added —the programs' widgets drawn by the scene (`windows … desk N`)— it simply does not use. Without that line, it is read with whatever is there. While the first is 0, nothing is promised: this is a language still being made.
 
 ## 2. What it guarantees
 
@@ -1639,8 +1639,13 @@ that holds), which are the scene's.
 **The programs' widgets on the desktop, drawn by the scene: `windows win max 16 desk 4`.** Under pleamar-wm built with `--features exp`, a program's surface on layer-shell's **bottom** level (a clock, a counter: a widget on the desktop) is not put together apart, under the scene's own surface: it comes to the scene as a window's frames do, in one of `desk`'s slots, right after the windows —`win.16` to `win.19` here—, and the scene draws it where it likes in its own picture, with the same `window`:
 
 ```plm
-repeat s in 16..20 {
-    window win.$s { at: win.$s.x, win.$s.y; size: max(win.$s.width, 1), max(win.$s.height, 1); ask: -1, -1; show: win.$s.open and win.$s.screen == screen.index }
+language 0.10
+scene Desk {
+    surface { size: full, full }
+    windows win max 16 desk 4
+    repeat s in 16..20 {
+        window win.$s { at: win.$s.x, win.$s.y; size: max(win.$s.width, 1), max(win.$s.height, 1); ask: -1, -1; show: win.$s.open and win.$s.screen == screen.index }
+    }
 }
 ```
 
@@ -2052,7 +2057,7 @@ scene Reference3 {
 This is the output of `pleamar --grammar`, copied. It is not a second list: these are the same tables (`src/language/vocabulary.rs`) the compiler consults to accept or reject a word. `./run-tests.sh` compares this block with what the program prints —if somebody adds a word and does not write it down here, it fails— and it also checks that **every word appears in some test**.
 
 ```vocabulary
-language: 0.9
+language: 0.10
 statements: surface permissions model service spring prop pose fact event text image figure font shader blur lens particles measure let zone body ellipse box arc line path input clip group popup component children repeat for row column grid pages space between layer on every blink wave spin follow look gesture posture translations windows window terminal
 library: let spring component permissions fact text model service event image figure font shader prop pose gesture posture layer translations
 properties.surface: size anchor margin level reserve screens keyboard open kind title app_id decorations rate captures agent
