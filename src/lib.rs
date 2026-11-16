@@ -345,17 +345,18 @@ pub fn run() {
     run_with(std::env::args().skip(1).collect());
 }
 
-/// How many arenas glibc's malloc keeps when nobody says (#153): see `malloc_arenas`.
+/// How many arenas glibc's malloc keeps when nobody says (#153): see `malloc_arenas`. 0, as glibc
+/// would have it: one arena, measured on Vitreus with a real card, kept the same memory and cost more CPU.
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
-const MALLOC_ARENAS: i32 = 1;
+const MALLOC_ARENAS: i32 = 0;
 
 /// glibc's malloc gives each thread that allocates an arena of its own, up to eight per core, and
-/// what one frees is kept there for that thread: the render, the logic and the workshop each kept
-/// their own leftovers, in pieces too small to give back. A bar that opened a few pages and was
-/// reloaded went from 110 to 151 MB, and `malloc_trim` gave back little (#153). With fewer arenas
-/// what one thread frees another uses. `PLEAMAR_MALLOC_ARENAS=n` says how many (`0`: as glibc
-/// would have it); without it, `MALLOC_ARENA_MAX` or `GLIBC_TUNABLES=glibc.malloc.arena_max=…`,
-/// if the person set either, are left as they are. Elsewhere (another libc, another system), nothing.
+/// what one frees is kept there for that thread. A small menu that opened 17 pages and was reloaded
+/// three times went from 110 to 151 MB, and to 130 with one arena (#153, measured filming on an
+/// Intel UHD 620). `PLEAMAR_MALLOC_ARENAS=n` says how many (`0`: as glibc would have it, which is
+/// what pleamar does when nobody says: see `MALLOC_ARENAS`); without it, `MALLOC_ARENA_MAX` or
+/// `GLIBC_TUNABLES=glibc.malloc.arena_max=…`, if the person set either, are left as they are.
+/// Elsewhere (another libc, another system), nothing.
 fn malloc_arenas() {
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     {
