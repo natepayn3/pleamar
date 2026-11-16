@@ -6080,7 +6080,8 @@ impl Gpu {
         // What the last capture of what is behind left, before painting with it.
         let scale = l.scale;
         if let Some(lens) = &mut l.lens {
-            lens.prepare(self, &self.lens, &mut encoder, scale);
+            let domes = dome_box(d, l.view.bounds(), scale, l.px);
+            lens.prepare(self, &self.lens, &mut encoder, scale, domes);
         }
         let backdrop_group = match l.own.as_ref().filter(|_| with_own) {
             Some(own) => &own.group,
@@ -6481,6 +6482,31 @@ fn glass_reach_box(d: &DrawList, view: [f32; 4], scale: f32, px: (u32, u32)) -> 
     }).reduce(|a, b| [a[0].min(b[0]), a[1].min(b[1]), a[2].max(b[2]), a[3].max(b[3])])?;
     let r = [((b[0] * scale).floor().max(0.0) as u32).min(px.0), ((b[1] * scale).floor().max(0.0) as u32).min(px.1), ((b[2] * scale).ceil().max(0.0) as u32).min(px.0), ((b[3] * scale).ceil().max(0.0) as u32).min(px.1)];
     (r[2] > r[0] && r[3] > r[1]).then_some(r)
+}
+
+/// The box, in real pixels of the surface, round the glasses with `dome:` this frame, with the margin the
+/// frosting reads: there what is unknown behind is filled before it is frosted (`lens::Fill`, #158). A dome
+/// looks towards the middle of its shape, so what it reads is inside its box; the frosting, a margin round
+/// it. `None`: no glass has a dome.
+fn dome_box(d: &DrawList, view: [f32; 4], scale: f32, px: (u32, u32)) -> Option<(u32, u32, u32, u32)> {
+    let m = crate::lens::margin();
+    let b = d
+        .glass_marks
+        .iter()
+        .map(|k| *k as usize)
+        .filter(|k| *k < d.element_count())
+        .map(|k| &d.elements[k * PER_ELEMENT..(k + 1) * PER_ELEMENT])
+        // A shape (`e[0]` 0) with a dome (`glass2.w`, see `glass_options`): as the shader, `want_dome`.
+        .filter(|e| e[0] == 0.0 && e[55].abs() > 0.0005)
+        .map(|e| [e[4] - view[0] - m, e[5] - view[1] - m, e[6] - view[0] + m, e[7] - view[1] + m])
+        .reduce(|a, b| [a[0].min(b[0]), a[1].min(b[1]), a[2].max(b[2]), a[3].max(b[3])])?;
+    let r = [
+        ((b[0] * scale).floor().max(0.0) as u32).min(px.0),
+        ((b[1] * scale).floor().max(0.0) as u32).min(px.1),
+        ((b[2] * scale).ceil().max(0.0) as u32).min(px.0),
+        ((b[3] * scale).ceil().max(0.0) as u32).min(px.1),
+    ];
+    (r[2] > r[0] && r[3] > r[1]).then(|| (r[0], r[1], r[2] - r[0], r[3] - r[1]))
 }
 
 fn grown_for_glass(cuts: Vec<[u32; 4]>, d: &DrawList, view: [f32; 4], scale: f32, px: (u32, u32)) -> Option<Vec<[u32; 4]>> {
