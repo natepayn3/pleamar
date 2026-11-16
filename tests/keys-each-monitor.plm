@@ -1,0 +1,17 @@
+// expect: ok
+// #156: a frame on every monitor (`screens: each`, named) that asks for the keyboard only
+// on the monitor the panel is open on, beside two scenes brought in with copies per monitor.
+// The `while` is read in each copy, with its `screen.index`; a key goes to the copies on the
+// monitor that has the keyboard, the frame's and the panel's, and to no other.
+import scene "brought/keys-each-panel.plm" as Panels
+import scene "brought/keys-each-wall.plm" as Wall
+scene Desk {
+    fact open_screen = 0
+    fact hits = 0
+    surface frame {
+        size: full, 40; screens: each
+        keyboard: exclusive while Panels.open == 1 and open_screen == screen.index
+        box edge { at: 0, 0; size: 10, 10; color: #ff0000 }
+        on key F9 { hits = hits + 1 }
+    }
+}

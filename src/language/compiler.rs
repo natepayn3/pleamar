@@ -829,6 +829,7 @@ pub fn compile<'a>(tree: &'a [Entry], files: &'a [String], dirs: &'a [std::path:
             // The rules are compiled afterwards, all in a row and in this same order:
             // here it is noted how many NODES are its own, and below it is translated into compiled ones.
             o.e.spans.push(crate::scene::Span { surface: k, instrs: i0..o.e.instrs.len(), behaviors: c0..o.e.behaviors.len(), rules: mark..o.rules.len() });
+            o.e.copy_rules.push((k, mark..o.rules.len()));
         }
     }
     let mut arrays: Vec<(usize, String, usize)> = o.arrays.iter().map(|(name, (length, line))| (*line, name.clone(), *length)).collect();
@@ -865,6 +866,10 @@ pub fn compile<'a>(tree: &'a [Entry], files: &'a [String], dirs: &'a [std::path:
     for t in &mut o.e.spans {
         let (a, b) = (t.rules.start.min(starts_at.len() - 1), t.rules.end.min(starts_at.len() - 1));
         t.rules = starts_at[a]..starts_at[b];
+    }
+    for (_, rules) in &mut o.e.copy_rules {
+        let (a, b) = (rules.start.min(starts_at.len() - 1), rules.end.min(starts_at.len() - 1));
+        *rules = starts_at[a]..starts_at[b];
     }
     for t in &mut o.e.pages {
         let (a, b) = (t.rules.start.min(starts_at.len() - 1), t.rules.end.min(starts_at.len() - 1));
@@ -919,17 +924,29 @@ pub fn compile<'a>(tree: &'a [Entry], files: &'a [String], dirs: &'a [std::path:
             }
         }
     }
+    // `keyboard: exclusive while … screen.index`, as `open:`: read once per copy of a
+    // `screens: each`, in its scope. Read once outside any scope, every copy had the
+    // first's condition with the scene's `screen.index`: they all asked for the keyboard
+    // or none did, whichever monitor the panel was open on (#156).
     for (which, tokens, (l, col)) in std::mem::take(&mut o.pending_keyboards) {
         o.scopes.clear();
-        let mut c = Cur::new(tokens, l, col);
-        match o.expr(&mut c) {
-            Ok(e) => {
-                let owner = o.e.surfaces[which].name.clone();
-                for s in o.e.surfaces.iter_mut().filter(|s| s.name == owner) {
-                    s.keyboard_when = Some(e.clone());
-                }
+        let owner = o.e.surfaces[which].name.clone();
+        let copies: Vec<(usize, Option<usize>)> = o.e.surfaces.iter().enumerate()
+            .filter(|(_, s)| s.name == owner)
+            .map(|(k, s)| (k, matches!(s.screens, Screens::Number(_)).then_some(s.instance)))
+            .collect();
+        for (k, instance) in copies {
+            if let Some(i) = instance {
+                o.scopes.push(Rc::new(o.screen_scope(i)));
             }
-            Err(f) => o.errors.push(f),
+            let mut c = Cur::new(tokens, l, col);
+            match o.expr(&mut c) {
+                Ok(e) => o.e.surfaces[k].keyboard_when = Some(e),
+                Err(f) => o.errors.push(f),
+            }
+            if instance.is_some() {
+                o.scopes.pop();
+            }
         }
     }
     // A surface that does not say `keyboard:` asks for it as the first one does —its
@@ -939,11 +956,19 @@ pub fn compile<'a>(tree: &'a [Entry], files: &'a [String], dirs: &'a [std::path:
     // become the condition of the ones that said nothing.
     if let Some((first, first_when)) = o.e.surfaces.first().map(|s| (s.keyboard, s.keyboard_when.clone())) {
         let scene_when = o.e.keyboard_while.is_some();
+        // When the first one is a `screens: each`, a copy of another takes the condition of
+        // the first's copy on its own monitor, read with that copy's `screen.index`.
+        let first_name = o.e.surfaces[0].name.clone();
+        let first_copies: Vec<(usize, Option<Expr>)> = o.e.surfaces.iter()
+            .filter(|s| s.name == first_name && matches!(s.screens, Screens::Number(_)))
+            .map(|s| (s.instance, s.keyboard_when.clone()))
+            .collect();
         for s in o.e.surfaces.iter_mut() {
             if !s.keyboard_said {
                 s.keyboard = first;
                 if s.keyboard_when.is_none() {
-                    s.keyboard_when = first_when.clone();
+                    let same_monitor = matches!(s.screens, Screens::Number(_)).then(|| first_copies.iter().find(|(i, _)| *i == s.instance)).flatten();
+                    s.keyboard_when = same_monitor.map_or_else(|| first_when.clone(), |(_, w)| w.clone());
                 }
             }
             s.keyboard_while = s.keyboard_when.is_some() || scene_when;
@@ -5789,11 +5814,11 @@ impl<'a> Compiler<'a> {
             if !draws {
                 return Ok(());
             }
-            let copies: Vec<(f32, f32, usize, bool)> = self.e.surfaces.iter().filter(|s| s.name == name).map(|s| (s.origin.0, s.origin.1, s.instance, matches!(s.screens, Screens::Number(_)))).collect();
+            let copies: Vec<(f32, f32, usize, bool, usize)> = self.e.surfaces.iter().enumerate().filter(|(_, s)| s.name == name).map(|(k, s)| (s.origin.0, s.origin.1, s.instance, matches!(s.screens, Screens::Number(_)), k)).collect();
             // A lock screen covers all of its monitor, whatever its `size:`
             // says: inside it, what the monitor measures is what it measures.
             let lock = self.e.surfaces.iter().any(|s| s.name == name && s.lock_screen);
-            for (ox, oy, instance, per_screen) in copies {
+            for (ox, oy, instance, per_screen, k) in copies {
                 let mark = self.rules.len();
                 // With `screens: each`, each copy has its own: its properties, its zones
                 // and its rules. `$screen` is its number, and `screen.name` that of its monitor.
@@ -5846,6 +5871,8 @@ impl<'a> Compiler<'a> {
                 self.e.paint(Instr::Transform(None));
                 if per_screen {
                     self.close_scope(mark);
+                    // Its rules, for the keys to reach only the copy on the keyboard's monitor (#156).
+                    self.e.copy_rules.push((k, mark..self.rules.len()));
                 } else if scoped {
                     self.scopes.pop();
                 }

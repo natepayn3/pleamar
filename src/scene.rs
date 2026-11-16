@@ -1959,8 +1959,23 @@ impl Scene {
         self.zone_springs.shrink_to_fit();
         self.behaviors.shrink_to_fit();
         self.spans.shrink_to_fit();
+        self.copy_rules.shrink_to_fit();
         self.pages.shrink_to_fit();
         self.prop_aliases.shrink_to_fit();
+    }
+
+    /// The rules that do not hear the keys while the keyboard is on `key_surface`: with
+    /// it on a copy of `screens: each`, those of every copy —of any surface— on another
+    /// monitor. A key pressed on the second monitor is that monitor's: the frame's copy
+    /// there and the panel's copy there hear it, the first monitor's do not. Before, only
+    /// the scene's own surface had its copies told apart: a named surface or a scene
+    /// brought in with `screens: each` ran its `on key` in every copy (#156).
+    /// With the keyboard on a surface that is not a copy, or nowhere known, all hear it.
+    pub fn rules_away_from_keys(&self, key_surface: Option<usize>) -> Vec<std::ops::Range<usize>> {
+        let Some(monitor) = key_surface.and_then(|k| self.surfaces.get(k)).filter(|s| matches!(s.screens, Screens::Number(_))).map(|s| s.instance) else {
+            return Vec::new();
+        };
+        self.copy_rules.iter().filter(|(k, _)| self.surfaces.get(*k).is_some_and(|s| s.instance != monitor)).map(|(_, r)| r.clone()).collect()
     }
 
     /// The pages (`include … while`) whose condition does not hold now.
@@ -2540,6 +2555,10 @@ pub struct Scene {
     /// the render skips its part entirely. Without this, two copies were twice
     /// the scene per frame even if one was not visible.
     pub spans: Vec<Span>,
+    /// With `screens: each`, the rules of every copy —the scene's surface's and the
+    /// named ones'— by the index of its surface: the keys go only to the copies on
+    /// the monitor that has the keyboard (#156). `spans` only has the scene's own.
+    pub copy_rules: Vec<(usize, std::ops::Range<usize>)>,
     /// The parts included with a `while` (`include "pages/settings.plm" while panel
     /// == settings`): while its condition does not hold, a page is asleep —its
     /// rules, its drawing, its zones and its behaviors are not looked at—, as a

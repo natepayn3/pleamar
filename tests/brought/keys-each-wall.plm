@@ -1,0 +1,5 @@
+// Brought into keys-each-monitor.plm (#156): a wallpaper with a copy per monitor.
+scene Wall {
+    surface { size: full, full; level: background; screens: each; keyboard: none }
+    box paint { at: 0, 0; size: 10, 10; color: #101418 }
+}

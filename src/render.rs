@@ -3480,18 +3480,9 @@ pub fn run(
             1 => &mut rule_index.awake_quiet,
             _ => &mut rule_index.awake_always,
         });
-        // The rules of the copies of a `screens: each` that do not have the keyboard: their
-        // keys, focus and blur are the copy's that has it (#156). (Not the scene's own rules,
-        // nor any while no copy has it.)
-        let key_away: Vec<std::ops::Range<usize>> = match key_surface.and_then(|ks| scene.surfaces.get(ks).map(|s| (ks, s))) {
-            Some((ks, kept)) if matches!(kept.screens, crate::scene::Screens::Number(_)) => scene
-                .spans
-                .iter()
-                .filter(|t| t.surface != ks && scene.surfaces.get(t.surface).is_some_and(|s| s.name == kept.name && matches!(s.screens, crate::scene::Screens::Number(_))))
-                .map(|t| t.rules.clone())
-                .collect(),
-            _ => Vec::new(),
-        };
+        // The rules of the copies of a `screens: each` on the monitors that do not have the
+        // keyboard: their keys, focus and blur are the copies' on the one that has it (#156).
+        let key_away = scene.rules_away_from_keys(key_surface);
         let keys_here = |k: usize| !key_away.iter().any(|r| r.contains(&k));
         {
             let c = Ctx { props: &props, facts: &facts, seen: None };

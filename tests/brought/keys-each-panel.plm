@@ -1,0 +1,8 @@
+// Brought into keys-each-monitor.plm (#156): a panel with a copy per monitor, its own `on key`.
+scene Panel {
+    fact open = 0
+    fact presses = 0
+    surface { size: 300, 200; screens: each; keyboard: on_demand }
+    box card { at: 150, 100; size: 280, 180; color: #202428 }
+    on key F10 { presses = presses + 1 }
+}

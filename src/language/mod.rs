@@ -784,6 +784,44 @@ mod tests {
     }
 
     #[test]
+    fn keys_go_to_the_copies_on_the_monitor_that_has_the_keyboard() {
+        // #156, in a shell: a named `screens: each` frame asking for the keyboard while
+        // `open_screen == screen.index`, beside two scenes brought in with copies per monitor.
+        let (scene, _) = super::read_file(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/keys-each-monitor.plm")).unwrap();
+        let fact = |n: &str| scene.facts.iter().position(|f| f.0 == n).unwrap_or_else(|| panic!("no fact {n}"));
+        let copies = |name: &str| -> Vec<usize> { scene.surfaces.iter().enumerate().filter(|(_, s)| s.name == name).map(|(k, _)| k).collect() };
+        let (frame, panel) = (copies("frame"), copies("Panels"));
+        assert_eq!((frame.len(), panel.len(), copies("Wall").len()), (4, 4, 4));
+        // The panel open on the second monitor: only the frame's copy there asks for the keyboard.
+        // (Read once for all the copies, it was the scene's `screen.index`: on the second
+        // monitor none asked, and on the first all four did.)
+        let mut facts: Vec<f32> = scene.facts.iter().map(|f| f.1).collect();
+        facts[fact("Panels.open")] = 1.0;
+        for monitor in 0..2 {
+            facts[fact("open_screen")] = monitor as f32;
+            let c = crate::scene::Ctx { props: &[], facts: &facts, seen: None };
+            let asking: Vec<usize> = frame.iter().filter(|&&k| scene.surfaces[k].keyboard_when.as_ref().is_some_and(|w| w.is_true(c))).map(|&k| scene.surfaces[k].instance).collect();
+            assert_eq!(asking, [monitor], "the panel open on monitor {monitor}");
+        }
+        // A key with the keyboard on the frame's copy on the second monitor: the frame's
+        // `on key F9` of that copy hears it, and the panel's `on key F10` of its copy there;
+        // the copies on the other monitors do not.
+        let away = scene.rules_away_from_keys(Some(frame[1]));
+        let hearing = |key: &str| -> Vec<usize> {
+            scene.rules.iter().enumerate().filter(|(k, r)| matches!(&r.when, crate::scene::Trigger::Key(x) if x == key) && !away.iter().any(|a| a.contains(k))).map(|(k, _)| k).collect()
+        };
+        let f9 = hearing("F9");
+        assert_eq!(f9.len(), 1, "the frame's F9 in one copy, not in all four");
+        let of = |k: usize| scene.copy_rules.iter().find(|(_, r)| r.contains(&k)).map(|(s, _)| scene.surfaces[*s].instance);
+        assert_eq!(of(f9[0]), Some(1));
+        let f10 = hearing("F10");
+        assert_eq!(f10.len(), 1, "the panel's F10 in its copy on that monitor");
+        assert_eq!(of(f10[0]), Some(1));
+        // With the keyboard on no copy, every copy hears it, as before.
+        assert!(scene.rules_away_from_keys(None).is_empty());
+    }
+
+    #[test]
     fn each_scene_brought_in_reads_its_own_monitor_text_and_zones() {
         // Issue 144: `screens: mon` in two scenes brought in, each its own `mon`.
         let (scene, _) = super::read_file(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/brought-monitor-text.plm")).unwrap();
@@ -1039,3 +1077,4 @@ mod tests {
         }
     }
 }
+
