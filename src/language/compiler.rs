@@ -4078,7 +4078,14 @@ impl<'a> Compiler<'a> {
                     if let Some(e) = self.scopes.last_mut().map(Rc::make_mut) {
                         e.with_parts.insert(local.to_owned());
                     }
-                    for part in ["width", "height", "count", "content"] {
+                    // With `view:`, where it is at too: `lst.scroll` read in a `let` or by the
+                    // zones of its own rows, before the stack is done (#157). The stack takes
+                    // this property as the one it scrolls with.
+                    let scrolls = n.body.as_deref().unwrap_or(&[]).iter().any(|e| matches!(e, Entry::Prop { name, .. } if name == "view"));
+                    for part in ["width", "height", "count", "content", "scroll"] {
+                        if part == "scroll" && !scrolls {
+                            continue;
+                        }
                         let full_name = format!("{name}.{part}");
                         if !self.props.contains_key(&full_name) {
                             let p = self.e.prop_with(interned(&full_name), 0.0, Spring::LIVELY);
@@ -7520,9 +7527,23 @@ impl<'a> Compiler<'a> {
         }
         // What is seen is a window onto what there is: it is clipped, and what is inside goes shifted.
         let mut scroll_transform = 0usize;
+        // The property declared early for `lst.scroll` (see `declare_measures_early`), if
+        // the stack has a name: what was read of it before here is where it really is.
+        let early = name.as_ref().and_then(|local| {
+            let was = self.unwatched.replace(true);
+            let g = self.global(&format!("{local}.scroll"));
+            self.unwatched.set(was);
+            self.props.get(&g).copied()
+        });
         let scroller = view.as_ref().map(|(vw, vh)| {
             self.copies += 1;
-            let prop = self.e.prop_with(interned(&format!("·scroll{}", self.copies)), 0.0, spring.unwrap_or(Spring::QUICK));
+            let prop = match early {
+                Some(p) => {
+                    self.e.props[p.0 as usize].2 = spring.unwrap_or(Spring::QUICK);
+                    p
+                }
+                None => self.e.prop_with(interned(&format!("·scroll{}", self.copies)), 0.0, spring.unwrap_or(Spring::QUICK)),
+            };
             let bounds = Shape::Rect { center: (vw.clone() * 0.5, vh.clone() * 0.5), half_size: (vw.clone() * 0.5, vh.clone() * 0.5), radius: corner.clone() };
             self.e.paint(Instr::Clip(Some((bounds, 0.0))));
             let scroll = Expr::K(0.0) - prop.e();

@@ -822,6 +822,24 @@ mod tests {
     }
 
     #[test]
+    fn a_list_scroll_is_read_before_the_list_is_done() {
+        // #157: `lst.scroll` in a `let` above the list and in its own rows' zones: it
+        // compiles, and it is the one property the list scrolls with (no second one).
+        let (scene, _) = super::read_file(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/list-scroll-early.plm")).unwrap();
+        let p = scene.zones.iter().find_map(|z| z.scrolls).expect("the list scrolls");
+        assert_eq!(scene.props[p.0 as usize].0, "lst.scroll");
+        assert_eq!(scene.props.iter().filter(|q| q.0.contains("scroll")).count(), 1, "one scroll property, not a hidden one beside it");
+        // The last row's zone reads it: scrolled to the end, it grows to its height.
+        let mut props: Vec<crate::scene::Animated> = scene.props.iter().map(|(_, v, s)| crate::scene::Animated { x: *v, v: 0.0, target: *v, spring: *s }).collect();
+        let facts: Vec<f32> = scene.facts.iter().map(|f| f.1).collect();
+        let row = scene.zones.iter().find(|z| z.id == "row.9").expect("row.9");
+        let height = |props: &[crate::scene::Animated]| row.bounds(crate::scene::Ctx { props, facts: &facts, seen: None }).map_or(0.0, |b| b[3] - b[1]);
+        let before = height(&props);
+        props[p.0 as usize].x = 472.0;
+        assert!(height(&props) > before + 50.0, "row.9 is {} tall at the end, {before} at the top", height(&props));
+    }
+
+    #[test]
     fn each_scene_brought_in_reads_its_own_monitor_text_and_zones() {
         // Issue 144: `screens: mon` in two scenes brought in, each its own `mon`.
         let (scene, _) = super::read_file(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/brought-monitor-text.plm")).unwrap();

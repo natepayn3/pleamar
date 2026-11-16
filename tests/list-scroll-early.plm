@@ -1,0 +1,17 @@
+// expect: ok
+// #157: `lst.scroll` read before its list is done —in a `let` above it, and by the zones of its
+// own rows— is where the list really is: one property, the one the wheel moves.
+scene ScrollEarly {
+    surface { size: 300, 400 }
+    let shifted = lst.scroll / 68
+    fact hit = 0
+    box bar { at: 280, 10 + shifted * 20; size: 6, 20; color: #888888 }
+    column lst { at: 0, 0; view: 200, 200; gap: 8
+        repeat k in 0..10 {
+            group { size: 200, 60
+                zone box row.$k { from: 0, 0; size: 200, max(0, min(60, 200 + lst.scroll - k * 68)) }
+            }
+            on press row.$k { hit = hit + 1 }
+        }
+    }
+}
