@@ -27,6 +27,14 @@ pub struct Pipelines {
     own: wgpu::RenderPipeline,
     own_over: wgpu::RenderPipeline,
     linear: wgpu::Sampler,
+    /// Filling the background's holes before it is frosted (`fill.wgsl`): down from the background's box, down,
+    /// the smallest level, up (into the levels, in `crate::blur::FORMAT`), and the last step up, into the filled
+    /// background's box (8 bits, as the background).
+    fill_first: wgpu::RenderPipeline,
+    fill_down: wgpu::RenderPipeline,
+    fill_top: wgpu::RenderPipeline,
+    fill_pull: wgpu::RenderPipeline,
+    fill_last: wgpu::RenderPipeline,
 }
 
 impl Pipelines {
@@ -90,12 +98,36 @@ impl Pipelines {
                 }
             }
         };
+        let fill = d.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("fill"), source: wgpu::ShaderSource::Wgsl(include_str!("fill.wgsl").into()) });
+        let fill_to = |fs: &str, format: wgpu::TextureFormat| {
+            d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(fs),
+                layout: None,
+                vertex: wgpu::VertexState { module: &fill, entry_point: Some("vs"), compilation_options: Default::default(), buffers: &[] },
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &fill,
+                    entry_point: Some(fs),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState { format, blend: None, write_mask: wgpu::ColorWrites::ALL })],
+                }),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
         Pipelines {
             unmix: pipeline("unmix"),
             checked,
             own: pipeline("own"),
             own_over: pipeline("own_over"),
             linear,
+            fill_first: fill_to("down_first", crate::blur::FORMAT),
+            fill_down: fill_to("down", crate::blur::FORMAT),
+            fill_top: fill_to("top", crate::blur::FORMAT),
+            fill_pull: fill_to("pull", crate::blur::FORMAT),
+            fill_last: fill_to("pull_last", wgpu::TextureFormat::Rgba8Unorm),
         }
     }
 }
@@ -149,6 +181,12 @@ pub struct Lens {
     /// (one pair of counts per part), and the canvas it was judged against, kept as a picture; which capture.
     judging: Option<Judging>,
     frost: Frost,
+    /// The background with its holes filled round the glasses with `dome:`, which is then what gets frosted
+    /// (see `Fill`); made when one is there, let go a while after there is none; and when it was last needed.
+    fill: Option<Fill>,
+    fill_used: std::time::Instant,
+    /// The last capture unmixed was filled: `Fill::filled` is the background as it stands, filled.
+    filling: bool,
     /// A sample of the last capture, and of which box it was: so as not to
     /// repeat the work if nothing has changed.
     sample: Vec<u8>,
@@ -208,6 +246,9 @@ impl Lens {
             verdict: d.create_buffer(&wgpu::BufferDescriptor { label: Some("verdict"), size: 8, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false }),
             judging: None,
             frost: Frost::new(d, px, b),
+            fill: None,
+            fill_used: std::time::Instant::now(),
+            filling: false,
             sample: Vec::new(),
             confirmed: false,
             ours_now: Some(Vec::new()),
@@ -489,9 +530,11 @@ impl Lens {
         self.ready = true;
     }
 
-    /// The unmixed background as it stands, once there is one.
+    /// The unmixed background as it stands, once there is one: filled round a `dome:` when it is (see
+    /// `Fill`), so what the scene paints under a glass is laid over that, not over its holes (`Own::take`).
     pub fn background(&self) -> Option<&wgpu::TextureView> {
-        self.ready.then(|| &self.backgrounds[self.current].1)
+        let filled = self.fill.as_ref().filter(|_| self.filling).map(|f| &f.filled.1);
+        self.ready.then(|| filled.unwrap_or(&self.backgrounds[self.current].1))
     }
 
     /// Still in its first moments: see `WARM_UP`.
@@ -500,8 +543,10 @@ impl Lens {
     }
 
     /// Unmixes and frosts what the last capture left, in the frame's
-    /// submission, before painting it.
-    pub fn prepare(&mut self, g: &crate::gpu::Gpu, t: &Pipelines, enc: &mut wgpu::CommandEncoder, scale: f32) {
+    /// submission, before painting it. `domes`: the box (real pixels) round the
+    /// glasses with `dome:` this frame, where what is unknown behind is filled
+    /// before frosting (see `Fill`); `None`, nowhere.
+    pub fn prepare(&mut self, g: &crate::gpu::Gpu, t: &Pipelines, enc: &mut wgpu::CommandEncoder, scale: f32, domes: Option<(u32, u32, u32, u32)>) {
         if self.fixed.is_some() && (std::mem::take(&mut self.fixed_frost) || self.frosted_with != g.blur_values) {
             self.frosted_with = g.blur_values;
             let (lw, lh) = self.px;
@@ -571,8 +616,31 @@ impl Lens {
                 None => pass(enc, &t.unmix, &self.backgrounds[new].1, &unmixing(&t.unmix.get_bind_group_layout(0), None), scissor),
             }
         }
+        // Round a `dome:`, the holes filled (all of its box at once: what fills a hole can come from anywhere
+        // round it), then frosted. Only there: a glass that does not look to one side reads what is under
+        // itself, and the frosting's own filling of small holes was always enough for it (#158). Without
+        // one the frosting reads the background as it did, and the filling costs nothing.
+        let now = std::time::Instant::now();
+        match domes {
+            Some(r) => {
+                self.fill_used = now;
+                if self.fill.as_ref().is_none_or(|f| !f.fits((r.2, r.3))) {
+                    self.fill = Some(Fill::new(dev, t, self.px, (r.2, r.3), [&self.backgrounds[0].1, &self.backgrounds[1].1]));
+                }
+            }
+            None if now.duration_since(self.fill_used) > FILL_KEPT_FOR => self.fill = None,
+            None => {}
+        }
+        self.filling = domes.is_some() && self.fill.is_some();
+        let sharp = match (domes, &mut self.fill) {
+            (Some(r), Some(fill)) => {
+                fill.run(&g.queue, t, enc, &self.backgrounds[new].0, new, r, &scissors);
+                &fill.filled.1
+            }
+            _ => &self.backgrounds[new].1,
+        };
         for &scissor in &scissors {
-            self.frost.run(g, enc, &self.backgrounds[new].1, scissor, scale);
+            self.frost.run(g, enc, sharp, scissor, scale);
         }
         self.current = new;
         if t.checked.is_some() {
@@ -795,6 +863,126 @@ fn pass(enc: &mut wgpu::CommandEncoder, pipeline: &wgpu::RenderPipeline, target:
     p.set_bind_group(0, group, &[]);
     p.set_scissor_rect(scissor.0, scissor.1, scissor.2, scissor.3);
     p.draw(0..3, 0..1);
+}
+
+/// How long the filling's pictures are kept with no `dome:` on the surface: a panel
+/// that comes and goes does not make them again each time.
+const FILL_KEPT_FOR: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The background with nothing unknown in it round the glasses with `dome:`, for the frosting (`fill.wgsl`, #158):
+/// the levels the box is averaged down to (from half its size to a few pixels), the same levels filled on the
+/// way back up, and the filled background, as big as the background (outside the box, a copy of it). The levels
+/// are made for a box of `size` —rounded up, made again only if it no longer fits or is four times too big—,
+/// and the bind groups of every step are made with them, once.
+struct Fill {
+    size: (u32, u32),
+    down: Vec<(wgpu::Texture, wgpu::TextureView)>,
+    up: Vec<(wgpu::Texture, wgpu::TextureView)>,
+    filled: (wgpu::Texture, wgpu::TextureView),
+    /// Where the box is (`Place` in `fill.wgsl`).
+    place: wgpu::Buffer,
+    /// The steps that read only the levels: down from each level, the smallest, up into each level.
+    downs: Vec<wgpu::BindGroup>,
+    top: wgpu::BindGroup,
+    pulls: Vec<wgpu::BindGroup>,
+    /// The first step down and the last up, for each of the two backgrounds.
+    first: [wgpu::BindGroup; 2],
+    last: [wgpu::BindGroup; 2],
+    /// The box it last filled: outside it, `filled` is the background as it was then.
+    filled_box: Option<(u32, u32, u32, u32)>,
+}
+
+/// The size the filling's levels are made for, for a box of `need`: rounded up to 64 pixels, so a box that
+/// moves or grows a little does not make them again.
+fn fill_size(need: (u32, u32)) -> (u32, u32) {
+    (need.0.max(1).div_ceil(64) * 64, need.1.max(1).div_ceil(64) * 64)
+}
+
+/// The sizes of the levels of a box of `size`: half of it, half of that…, down to two pixels or less.
+fn fill_levels(size: (u32, u32)) -> Vec<(u32, u32)> {
+    let (mut w, mut h) = size;
+    let mut out = Vec::new();
+    while w > 2 || h > 2 {
+        w = w.div_ceil(2).max(1);
+        h = h.div_ceil(2).max(1);
+        out.push((w, h));
+    }
+    out
+}
+
+impl Fill {
+    fn new(d: &wgpu::Device, t: &Pipelines, px: (u32, u32), need: (u32, u32), backgrounds: [&wgpu::TextureView; 2]) -> Fill {
+        use wgpu::TextureUsages as U;
+        let size = fill_size(need);
+        let mut down = Vec::new();
+        let mut up = Vec::new();
+        for wh in fill_levels(size) {
+            down.push(texture(d, "fill down", wh, crate::blur::FORMAT, U::RENDER_ATTACHMENT | U::TEXTURE_BINDING));
+            up.push(texture(d, "fill up", wh, crate::blur::FORMAT, U::RENDER_ATTACHMENT | U::TEXTURE_BINDING));
+        }
+        let filled = texture(d, "filled", px, wgpu::TextureFormat::Rgba8Unorm, U::RENDER_ATTACHMENT | U::TEXTURE_BINDING | U::COPY_DST | U::COPY_SRC);
+        let place = d.create_buffer(&wgpu::BufferDescriptor { label: Some("fill: where"), size: 16, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+        let group = |p: &wgpu::RenderPipeline, src: &wgpu::TextureView, coarse: Option<&wgpu::TextureView>, placed: bool| {
+            let mut entries = vec![wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(src) }];
+            if let Some(c) = coarse {
+                entries.push(wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(c) });
+                entries.push(wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&t.linear) });
+            }
+            if placed {
+                entries.push(wgpu::BindGroupEntry { binding: 3, resource: place.as_entire_binding() });
+            }
+            d.create_bind_group(&wgpu::BindGroupDescriptor { label: None, layout: &p.get_bind_group_layout(0), entries: &entries })
+        };
+        // (`fill_levels` gives at least one level for any box bigger than two pixels, and `fill_size` makes it 64.)
+        let last = down.len() - 1;
+        let downs = (1..down.len()).map(|k| group(&t.fill_down, &down[k - 1].1, None, false)).collect();
+        let top = group(&t.fill_top, &down[last].1, None, false);
+        let pulls = (0..last).map(|k| group(&t.fill_pull, &down[k].1, Some(&up[k + 1].1), false)).collect();
+        let first = backgrounds.map(|b| group(&t.fill_first, b, None, true));
+        let last_groups = backgrounds.map(|b| group(&t.fill_last, b, Some(&up[0].1), true));
+        Fill { size, down, up, filled, place, downs, top, pulls, first, last: last_groups, filled_box: None }
+    }
+
+    /// Whether it holds a box of `need` without being wasteful (as `Own::fits`).
+    fn fits(&self, need: (u32, u32)) -> bool {
+        let want = fill_size(need);
+        self.size.0 >= want.0 && self.size.1 >= want.1 && (self.size.0 as u64 * self.size.1 as u64) <= 4 * (want.0 as u64 * want.1 as u64)
+    }
+
+    /// Fills background `which`'s holes in `r` into `filled`: down to the smallest level, then back up. Outside
+    /// `r`, `filled` is made the background again: all of it when the box moved, and otherwise only what the
+    /// capture changed (`parts`), which is all that differs from what it was.
+    fn run(&mut self, queue: &wgpu::Queue, t: &Pipelines, enc: &mut wgpu::CommandEncoder, background: &wgpu::Texture, which: usize, r: (u32, u32, u32, u32), parts: &[(u32, u32, u32, u32)]) {
+        let copy = |enc: &mut wgpu::CommandEncoder, (x, y, w, h): (u32, u32, u32, u32)| {
+            let at = wgpu::Origin3d { x, y, z: 0 };
+            enc.copy_texture_to_texture(
+                wgpu::TexelCopyTextureInfo { texture: background, mip_level: 0, origin: at, aspect: wgpu::TextureAspect::All },
+                wgpu::TexelCopyTextureInfo { texture: &self.filled.0, mip_level: 0, origin: at, aspect: wgpu::TextureAspect::All },
+                wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            );
+        };
+        if self.filled_box == Some(r) {
+            for &p in parts {
+                copy(enc, p);
+            }
+        } else {
+            copy(enc, (0, 0, background.width(), background.height()));
+            self.filled_box = Some(r);
+        }
+        queue.write_buffer(&self.place, 0, bytemuck::cast_slice(&[r.0 as f32, r.1 as f32, r.2 as f32, r.3 as f32]));
+        // Whole levels: past the box (they are rounded up) the first one is unknown, alpha 0, and weighs nothing.
+        let whole = |v: &(wgpu::Texture, wgpu::TextureView)| (0, 0, v.0.width(), v.0.height());
+        let last = self.down.len() - 1;
+        pass(enc, &t.fill_first, &self.down[0].1, &self.first[which], whole(&self.down[0]));
+        for k in 1..self.down.len() {
+            pass(enc, &t.fill_down, &self.down[k].1, &self.downs[k - 1], whole(&self.down[k]));
+        }
+        pass(enc, &t.fill_top, &self.up[last].1, &self.top, whole(&self.up[last]));
+        for k in (0..last).rev() {
+            pass(enc, &t.fill_pull, &self.up[k].1, &self.pulls[k], whole(&self.up[k]));
+        }
+        pass(enc, &t.fill_last, &self.filled.1, &self.last[which], r);
+    }
 }
 
 /// The frosting's pictures, one per pass of the scene's blur (`blur.rs`),
@@ -1484,5 +1672,145 @@ impl Compare {
         let looked = size.0.div_ceil(3) as u64 * size.1.div_ceil(3) as u64;
         let strictly = n[0] == 0;
         (strictly, strictly || (!ours.is_empty() && n[2] as u64 * 2 > looked && n[1] == 0))
+    }
+}
+
+#[cfg(test)]
+mod fill_tests {
+    use super::*;
+
+    #[test]
+    fn the_levels_are_made_for_a_box_rounded_up_and_made_again_only_when_needed() {
+        assert_eq!(fill_size((700, 421)), (704, 448));
+        assert_eq!(fill_size((0, 0)), (64, 64));
+        // Halves, rounded up, down to two pixels or less: an odd side is not lost.
+        assert_eq!(fill_levels((64, 64)), [(32, 32), (16, 16), (8, 8), (4, 4), (2, 2)]);
+        assert_eq!(fill_levels((192, 64)), [(96, 32), (48, 16), (24, 8), (12, 4), (6, 2), (3, 1), (2, 1)]);
+    }
+
+    /// Fills a background with a hole in it on a card (a software one will do; none, and it says so and passes):
+    /// inside the box nothing is unknown any more and what was known is as it was, the hole takes the colours
+    /// round it, and outside the box the filled background is the background as it is, hole and all.
+    #[test]
+    fn a_hole_is_filled_from_round_it_and_only_inside_the_box() {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let Ok(adapter) = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default())) else {
+            eprintln!("no graphics card, not even a software one: not tried");
+            return;
+        };
+        let (d, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).expect("a device");
+        let t = Pipelines::new(&d);
+        let (w, h) = (130u32, 70u32);
+        // Left half blue, right half orange; a hole (alpha 0) in the middle, 40 × 30; and one more at the
+        // left edge, outside the box, which stays a hole.
+        let hole = |x: u32, y: u32| (45..85).contains(&x) && (20..50).contains(&y);
+        let outside_hole = |x: u32, y: u32| x < 6 && (30..40).contains(&y);
+        let mut px = Vec::with_capacity((w * h * 4) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                px.extend_from_slice(&if hole(x, y) || outside_hole(x, y) { [0, 0, 0, 0] } else if x < w / 2 { [40, 90, 220, 255] } else { [240, 150, 40, 255] });
+            }
+        }
+        let usage = wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::COPY_DST;
+        let backgrounds = [texture(&d, "background", (w, h), wgpu::TextureFormat::Rgba8Unorm, usage), texture(&d, "background", (w, h), wgpu::TextureFormat::Rgba8Unorm, usage)];
+        queue.write_texture(backgrounds[1].0.as_image_copy(), &px, wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(w * 4), rows_per_image: Some(h) }, wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 });
+        // The box: all but a 10-pixel band on the left (an odd size, 117 × 67, to try the odd edges too).
+        let r = (10, 1, 117, 67);
+        let mut fill = Fill::new(&d, &t, (w, h), (r.2, r.3), [&backgrounds[0].1, &backgrounds[1].1]);
+        let mut enc = d.create_command_encoder(&Default::default());
+        fill.run(&queue, &t, &mut enc, &backgrounds[1].0, 1, r, &[]);
+        let row = (w * 4).div_ceil(256) * 256;
+        let out = d.create_buffer(&wgpu::BufferDescriptor { label: None, size: (row * h) as u64, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+        enc.copy_texture_to_buffer(fill.filled.0.as_image_copy(), wgpu::TexelCopyBufferInfo { buffer: &out, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: Some(h) } }, wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 });
+        queue.submit([enc.finish()]);
+        out.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+        d.poll(wgpu::PollType::Wait { submission_index: None, timeout: Some(std::time::Duration::from_secs(30)) }).expect("the card answers");
+        let got: Vec<u8> = out.slice(..).get_mapped_range().expect("mapped").to_vec();
+        let at = |x: u32, y: u32| -> [u8; 4] { let i = (y * row + x * 4) as usize; [got[i], got[i + 1], got[i + 2], got[i + 3]] };
+        let inside = |x: u32, y: u32| x >= r.0 && x < r.0 + r.2 && y >= r.1 && y < r.1 + r.3;
+        for y in 0..h {
+            for x in 0..w {
+                let (was, now) = (&px[((y * w + x) * 4) as usize..][..4], at(x, y));
+                if !inside(x, y) {
+                    assert_eq!(now, was, "outside the box, at {x},{y}: the background as it is");
+                } else if hole(x, y) {
+                    assert_eq!(now[3], 255, "the hole at {x},{y} is known now: {now:?}");
+                    // Between the two colours round it, never darker than both (no dark card).
+                    for c in 0..3 {
+                        assert!(now[c] + 3 >= 40u8.min([90, 150][c.min(1)]).min([40, 90, 220][c].min([240, 150, 40][c])), "at {x},{y}: {now:?}");
+                        assert!(now[c] <= [40, 90, 220][c].max([240, 150, 40][c]) + 3, "at {x},{y}: {now:?}");
+                    }
+                } else {
+                    for c in 0..4 {
+                        assert!((now[c] as i32 - was[c] as i32).abs() <= 1, "what was known at {x},{y} is as it was: {was:?} → {now:?}");
+                    }
+                }
+            }
+        }
+        // Deep in the hole on the left it is mostly blue, on the right mostly orange: from round it, not one flat colour.
+        let (l, rr) = (at(50, 35), at(80, 35));
+        assert!(l[2] > rr[2] && rr[0] > l[0], "left of the hole {l:?}, right {rr:?}");
+    }
+
+    /// What the filling costs on a real card, per capture, for a 1920 × 1080 surface: the box as big as the surface
+    /// (what the first version of #158 did on every capture, with or without a dome) and as big as a settings
+    /// panel (900 × 700); and its pictures' memory. `cargo test --lib -- --ignored fill_cost --nocapture`.
+    #[test]
+    #[ignore = "measures on a real graphics card; run with --ignored"]
+    fn fill_cost_on_the_card() {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default())).expect("a card");
+        let (d, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).expect("a device");
+        println!("fill_cost · {}", adapter.get_info().name);
+        let t = Pipelines::new(&d);
+        let px = (1920u32, 1080u32);
+        let usage = wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::COPY_DST;
+        let backgrounds = [texture(&d, "background", px, wgpu::TextureFormat::Rgba8Unorm, usage), texture(&d, "background", px, wgpu::TextureFormat::Rgba8Unorm, usage)];
+        let wait = || d.poll(wgpu::PollType::Wait { submission_index: None, timeout: Some(std::time::Duration::from_secs(60)) }).expect("the card answers");
+        for (what, r) in [("the whole surface", (0, 0, 1920, 1080)), ("a 900 x 700 panel", (510, 190, 900, 700))] {
+            let mut fill = Fill::new(&d, &t, px, (r.2, r.3), [&backgrounds[0].1, &backgrounds[1].1]);
+            let bytes: u64 = fill.down.iter().chain(&fill.up).map(|l| l.0.width() as u64 * l.0.height() as u64 * 8).sum::<u64>() + px.0 as u64 * px.1 as u64 * 4;
+            // A capture of part of the box: the box stays, only that part is copied again.
+            let parts = [(r.0, r.1, r.2.min(400), r.3.min(300))];
+            let mut run = |n: usize, groups_each_time: bool| -> (f64, f64) {
+                let start = std::time::Instant::now();
+                let mut encode = 0.0;
+                for _ in 0..n {
+                    let e0 = std::time::Instant::now();
+                    let mut enc = d.create_command_encoder(&Default::default());
+                    if groups_each_time {
+                        // As the first version: a bind group for every step made again on every capture.
+                        for k in 0..fill.down.len() * 2 + 1 {
+                            let v = &fill.down[k % fill.down.len()].1;
+                            let _ = d.create_bind_group(&wgpu::BindGroupDescriptor { label: None, layout: &t.fill_down.get_bind_group_layout(0), entries: &[wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(v) }] });
+                        }
+                    }
+                    fill.run(&queue, &t, &mut enc, &backgrounds[1].0, 1, r, &parts);
+                    let cb = enc.finish();
+                    encode += e0.elapsed().as_secs_f64();
+                    queue.submit([cb]);
+                    wait();
+                }
+                (start.elapsed().as_secs_f64() * 1000.0 / n as f64, encode * 1000.0 / n as f64)
+            };
+            run(10, false);
+            let (each, cpu) = run(200, false);
+            println!("fill_cost · {what}: {each:.3} ms a capture (submitted and waited for), of which {cpu:.3} ms on the CPU · {:.1} MB of card memory", bytes as f64 / 1e6);
+            if r.2 == 1920 {
+                let (_, cpu) = run(50, true);
+                println!("fill_cost · {what}, with its bind groups made on every capture: {cpu:.3} ms on the CPU");
+            }
+        }
+        let mut enc = d.create_command_encoder(&Default::default());
+        enc.copy_texture_to_texture(backgrounds[1].0.as_image_copy(), backgrounds[0].0.as_image_copy(), wgpu::Extent3d { width: px.0, height: px.1, depth_or_array_layers: 1 });
+        let start = std::time::Instant::now();
+        for _ in 0..200 {
+            let mut enc = d.create_command_encoder(&Default::default());
+            enc.copy_texture_to_texture(backgrounds[1].0.as_image_copy(), backgrounds[0].0.as_image_copy(), wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 });
+            queue.submit([enc.finish()]);
+            wait();
+        }
+        println!("fill_cost · an empty submission, to subtract: {:.3} ms", start.elapsed().as_secs_f64() * 1000.0 / 200.0);
+        drop(enc);
     }
 }
