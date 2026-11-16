@@ -1,0 +1,4 @@
+// expect: error «no bigger than the size the window opens at»
+scene Notes {
+    surface { size: 420, 300; kind: window; title: "Notes"; min_size: 900, 300 }
+}

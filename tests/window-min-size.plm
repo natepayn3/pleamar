@@ -1,0 +1,6 @@
+// expect: ok
+// A window that opens at one size and can be made smaller, down to another.
+scene Notes {
+    surface { size: 900, 600; kind: window; title: "Notes"; min_size: 420, 300 }
+    box { from: 0, 0; size: screen.width, screen.height; color: #1b1d1f }
+}

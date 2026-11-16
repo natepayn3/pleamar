@@ -6064,6 +6064,25 @@ impl<'a> Compiler<'a> {
             }
             s.frameless = v == "none";
         }
+        if let Some(c) = p.get_mut("min_size") {
+            // The smallest it can be stretched down to. Without it, that is the
+            // size it opens at.
+            let w = c.num()?;
+            c.expect_sym(",")?;
+            let h = c.num()?;
+            c.expect_end()?;
+            if s.window.is_none() {
+                return Err(CompileError::at(n.line, n.col, "only a window has a min_size: add `kind: window`"));
+            }
+            if w < 1.0 || h < 1.0 {
+                return Err(CompileError::at(n.line, n.col, "a min_size is a width and a height of at least 1: `min_size: 520, 380`"));
+            }
+            let (w, h) = (w as u32, h as u32);
+            if w > s.width || h > s.height {
+                return Err(CompileError::at(n.line, n.col, format!("a min_size is no bigger than the size the window opens at ({}, {})", s.width, s.height)));
+            }
+            s.min_size = Some((w, h));
+        }
         if s.window.is_some() && s.width == 0 {
             return Err(CompileError::at(n.line, n.col, "a window says how wide it is: `full` is for a panel, which is as wide as its monitor"));
         }

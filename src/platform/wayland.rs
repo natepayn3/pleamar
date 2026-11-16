@@ -1579,7 +1579,9 @@ impl State {
                 let window = pp.xdg.create_window(wl, if p.frameless { WindowDecorations::None } else { WindowDecorations::RequestServer }, qh);
                 window.set_title(if title.is_empty() { "pleamar" } else { title });
                 window.set_app_id(p.app_id.as_deref().unwrap_or("pleamar"));
-                window.set_min_size(Some((p.width, height)));
+                // No smaller than what it says (`min_size:`), or than it opens at.
+                let (min_w, min_h) = p.min_size.unwrap_or((p.width, p.height));
+                window.set_min_size(Some((min_w, min_h + height - p.height)));
                 let id = next_surface_id();
                 window.commit();
                 // A name for it that other programs can be given: a system dialog then belongs to it.
