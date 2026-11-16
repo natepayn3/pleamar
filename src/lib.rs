@@ -487,7 +487,12 @@ pub fn run_with(options: Vec<String>) {
         flags = wgpu::InstanceFlags::VALIDATION | wgpu::InstanceFlags::DEBUG;
     }
     let instance = graphics_instance(flags);
-    let wanted = scene.surfaces.clone();
+    // A copy for a list of monitors (#150) starts on none: the render says where, once it knows
+    // which monitor is which, and it never shows a moment where the list does not name it.
+    let wanted: Vec<_> = scene.surfaces.iter().map(|s| match s.on_list {
+        Some(_) => scene::Surface { screens: scene::Screens::Named(Vec::new()), ..s.clone() },
+        None => s.clone(),
+    }).collect();
     // Filmed: no screen, the clock virtual, no waiting for anything.
     if let Some(out) = &a.film {
         if let Err(e) = platform::film::start(out, a.fps, a.mouse.as_deref(), a.seconds) {

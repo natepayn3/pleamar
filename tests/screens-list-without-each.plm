@@ -1,0 +1,11 @@
+// expect: ok
+// #150: without a scene surface with `screens: each` a list of monitors is as before: one surface,
+// placed on every monitor the list names.
+scene ScreensListAlone {
+    surface { size: 1, 1 }
+    text lst = "HDMI-A-2,HDMI-A-1"
+    surface dk {
+        size: 300, 60; screens: lst
+        box { from: 0, 0; size: 300, 60; color: #000000 }
+    }
+}

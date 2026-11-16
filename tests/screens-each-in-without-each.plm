@@ -1,0 +1,10 @@
+// expect: error «makes a copy for each copy of the scene's own surface with `screens: each`»
+// #150: `screens: each in` needs the scene's own surface to have `screens: each`: its copies say which monitor is which.
+scene EachInAlone {
+    surface { size: 1, 1 }
+    text lst = "HDMI-A-2,HDMI-A-1"
+    surface dk {
+        size: 300, 60; screens: each in lst
+        box { from: 0, 0; size: 300, 60; color: #000000 }
+    }
+}
