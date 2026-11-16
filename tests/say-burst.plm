@@ -1,0 +1,10 @@
+// expect: ok
+// #159 (dkhlapov): `--say x "text x.v <value>" "emit x"` in a burst: the logic (say-burst.luau) has to read
+// the text of its own call at each `x`, and hear each one with `on("text:x.v")`, in order.
+scene X {
+    surface { size: 200, 100 }
+    text x.v = ""
+    text out = ""
+    text heard = ""
+    event x ->
+}

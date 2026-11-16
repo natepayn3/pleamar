@@ -2494,6 +2494,10 @@ pub fn ms(n: u64) -> Duration {
     Duration::from_millis(n)
 }
 
+/// The events of the scene on show that the logic hears (`event x ->`): the render leaves them here
+/// with each scene, so that what is said from outside can reach the logic in its order.
+pub static LOGIC_HEARS: std::sync::Mutex<Vec<&'static str>> = std::sync::Mutex::new(Vec::new());
+
 #[derive(Default)]
 pub struct Scene {
     /// The scenes brought into this one (`import scene "bar.plm" as Bar`, G22): the name it
@@ -2939,6 +2943,9 @@ pub enum ToRender {
     Signal(&'static str),
     /// A signal that comes from outside the program: the scene and the logic hear it.
     ExternalSignal(&'static str, Option<f32>),
+    /// The same, when the logic has already been told in its place in the queue (`--say`'s `emit`,
+    /// which goes to the logic beside the `text` before it): the scene hears it, the logic is not told again.
+    ExternalSignalTold(&'static str, Option<f32>),
     Gesture(&'static str),
     Pointer(Option<(f32, f32)>),
     /// Where the mouse is on the whole desktop, wherever it is, and the

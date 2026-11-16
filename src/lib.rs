@@ -612,7 +612,19 @@ pub fn run_with(options: Vec<String>) {
                 return Some(answer.recv_timeout(std::time::Duration::from_secs(1)).unwrap_or_else(|_| "? the render does not answer".into()));
             }
             let _ = match what {
-                "emit" => tx.send(ToRender::ExternalSignal(scene::intern(who), rest.parse().ok())),
+                // To the logic at once, in its place among the texts said before and after it, if the
+                // logic hears it; the render only runs the scene's rules. Through the render alone it
+                // reached the logic after the next texts: each `x` read the text of a later call (#159).
+                "emit" => {
+                    let (name, payload) = (scene::intern(who), rest.parse().ok());
+                    match scene::LOGIC_HEARS.lock().unwrap().contains(&name) {
+                        true => {
+                            let _ = to_logic.send(Event::Signal(name, payload));
+                            tx.send(ToRender::ExternalSignalTold(name, payload))
+                        }
+                        false => tx.send(ToRender::ExternalSignal(name, payload)),
+                    }
+                }
                 // What is set from outside, the logic has to know: it did not set it itself.
                 // What is written is understood according to what that fact is: `true`, `critical`, `3`.
                 "fact" => tx.send(ToRender::ExternalFact(scene::intern(who), rest.to_owned())),

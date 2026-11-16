@@ -1030,6 +1030,7 @@ pub fn run(
                     }
                 }
                 ToRender::Scene(fresh) => {
+                    *crate::scene::LOGIC_HEARS.lock().unwrap() = fresh.signals.iter().filter(|s| s.1).map(|s| s.0).collect();
                     let swapping = crate::clock::now();
                     crate::platform::release_memory();
                     crate::platform::CURSOR_WANTED.store(fresh.wants_cursor, std::sync::atomic::Ordering::Relaxed);
@@ -1580,6 +1581,11 @@ pub fn run(
                 },
                 ToRender::ExternalSignal(name, payload) => match scene.signals.iter().position(|s| s.0 == name) {
                     Some(i) => signals.push((i, false, payload)),
+                    None => eprintln!("render · I don't know the event '{name}'"),
+                },
+                // Already told to the logic, in its place among the orders: the rules run, nothing goes out again.
+                ToRender::ExternalSignalTold(name, payload) => match scene.signals.iter().position(|s| s.0 == name) {
+                    Some(i) => signals.push((i, true, payload)),
                     None => eprintln!("render · I don't know the event '{name}'"),
                 },
                 ToRender::Gesture(name) => match scene.gestures.iter().position(|g| g.name == name) {
