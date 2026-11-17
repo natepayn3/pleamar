@@ -1,6 +1,6 @@
 # Measuring pleamar against Quickshell
 
-How the numbers in the README were taken, so they can be taken again the same
+How the numbers in [docs/why.md](../docs/why.md) were taken, so they can be taken again the same
 way. The point is to compare like with like: same machine, same monitor, both
 freshly started, both animating.
 

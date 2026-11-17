@@ -105,86 +105,14 @@ So if you are on Hyprland and just want a new bar, pleamar is all you need.
 
 # Why pleamar
 
-**Motion first**
+- **Motion first**: every property is a spring, and animation never waits for the
+  logic; save the file and it reloads without losing what was in motion.
+- **Drawing**: shapes that melt into each other, glass, blur, glow, particles and
+  your own shaders.
+- **A whole desktop**: bars, docks, launchers, lock screens, widgets, and with
+  pleamar-wm the window manager itself.
 
-- **Animation never depends on logic**: the scene declares what moves and with
-  which spring; a render thread walks it at the screen's pace. With the logic
-  stalled for 600 ms, 38 frames still come out at 17 ms each.
-- **Every property is a spring** — interrupt it halfway and it turns without a jolt.
-- **Live reload**: save the file and it reloads without losing what was in motion;
-  save it broken and the last good scene stays, with a band saying where.
-
-**Drawing**
-
-- **Shapes that melt into each other**: shadow, rim, light, gradients, glass that
-  bends what is behind it (clear, frosted, smoked or milky), blur, glow,
-  particles and your own WGSL shaders, all signed distance underneath.
-- **An svg comes in as paths**, by layers, and melts with what carries it.
-- **Enough for a small game**: a handler for every frame, held keys, the mouse,
-  what touches what, sound, game controllers, sheets of pictures and pixel art.
-
-**A language that checks itself**
-
-- **Checked on load**: a misspelled name is an error with file, line, arrow and
-  «did you mean…?», never an `undefined` at runtime.
-- **Luau logic in a sandbox**, on its own thread, behind permissions you approve —
-  a plugin runs with what you allow it, never with everything you can do.
-
-**The system, already there**
-
-- **Services with no code**: clock, audio, battery, network, media,
-  notifications, tray, windows and their thumbnails, brightness, files — named
-  in the scene and filled.
-- **Lock screens** on `ext-session-lock`, where the compositor guarantees nothing
-  else is seen while it lasts.
-- **The password dialog**: a scene can be the session's polkit agent and draw it
-  itself, when a program wants root.
-- **Its own compositor**: [pleamar-wm] runs other programs' windows inside a scene,
-  so the window manager is one more file you can rewrite.
-
-**Built with AI in mind**
-
-- **Your agent knows it**: the installer teaches Claude Code, Codex and OpenCode
-  to build and verify pleamar scenes for you ([more below](#with-your-ai-agent)).
-- **And it can use your desktop**: in [pleamar-wm] an agent gets a pointer and a
-  keyboard of its own, while yours stay yours.
-
-### The quick comparison
-
-The same bar, written twice: in Quickshell (`proyecto-marea`, 370 QML files) and
-in pleamar (`marea-plm`, one `.plm` and one `.luau`). Both running at once, both
-freshly started, same 60 Hz monitor, on an RTX 2060.
-
-| | Quickshell | pleamar |
-| --- | --- | --- |
-| real memory (PSS) | 336 MB | **81 MB** |
-| time to first frame | 1876 ms | **175 ms** |
-| frames per second while animating | ~24 | **60** |
-| CPU per painted frame | 0.257 % | **0.083 %** |
-| CPU with nothing moving | never drops | **0.3 %** |
-| opening a panel | 6.2 % → 12.3 %, and 9.5 % after closing it | 4.4 % → 4.9 %, and back to 4.5 % |
-
-On raw CPU, with both animating, the difference is 20 %: **4.96 % against
-6.17 %**. That is what it is, and it should be said before the pretty numbers.
-What changes the picture is that pleamar is painting **two and a half times more
-frames** while spending less, and that when nothing moves it **sleeps**.
-
-The numbers, how they were taken and what to watch out for: `marea-plm/MEDIDAS.md`.
-
-# What's new
-
-- **0.6 — what the language would not let you write**: a quote inside a text
-  (`\"`), a block that opens on the line after its header, and a colour chosen
-  with `pick` or `if` inside a `let`.
-- **0.5 — a round costs what changed**: a big scene only works out again what
-  changed in it (a pleamar-wm round went from 1.2 ms to 0.4 ms), edges are
-  sharper and blended as light would blend them, layouts can hold a chat
-  (`stick: end`, `place:`, `tight:`), `motion.reduced` and `color.scheme` come
-  from the desktop, and a scene paints on the same card the compositor paints with.
-- **0.5.1 – 0.5.3**: the mouse's side buttons reach a scene, and apps and icons
-  installed while a shell runs show up without restarting it.
-
-Every release, with what changed: [Releases].
+More, with the numbers and a quick comparison with other toolkits: **[docs/why.md](docs/why.md)**.
 
 # Install
 
@@ -223,27 +151,8 @@ dotfiles: your shells (`shells/`), what starts with the desktop (`autostart`;
 on Hyprland or any other compositor, `exec-once = pleamar --autostart`), and for
 pleamar-wm its `session.conf`, `keys.conf` and your own `wm/session.plm`.
 
-### Nix and NixOS
 
-```sh
-nix run github:k4ditano/pleamar -- --scene bar.plm
-```
-
-As a flake input (`pleamar.url = "github:k4ditano/pleamar"`): the package
-(`pleamar.packages.${system}.default`, or `pkgs.pleamar` through
-`pleamar.overlays.default`) and a home-manager module:
-
-```nix
-imports = [ inputs.pleamar.homeManagerModules.default ];
-programs.pleamar = {
-  enable = true;
-  autostart = true;   # runs ~/.config/pleamar/autostart with your graphical session
-};
-```
-
-The whole desktop (pleamar-wm with Marea, in your login screen) is
-[pleamar-wm]'s NixOS module. With Nix on another distribution, graphical Nix
-programs need [nixGL] to reach your GPU driver.
+On **Nix or NixOS**: [docs/install-nix.md](docs/install-nix.md).
 
 # Your first scene
 
@@ -282,44 +191,8 @@ scene Clock {
 `pleamar --scene clock.plm`, and it is on your screen. Save the file and it
 reloads without losing whatever was in motion.
 
-### The language in five minutes
 
-A `.plm` file is a scene: what is seen, and how it reacts.
-
-| | |
-| --- | --- |
-| `surface { size: full, 44; anchor: top }` | the window it asks for. Several per scene, and `kind: window` for a normal one |
-| `fact open = false` · `text title = "…"` | what the logic may report. Typed too: `fact mode: low \| normal \| critical` |
-| `prop x = 360 ~calm` | something that moves. Every property is a spring |
-| `service audio { volume: number; muted: bool }` | a system service, by name, with no logic |
-| `model rows max 14 { label: text }` · `for r in rows { … }` | a list the logic fills |
-| `box`, `ellipse`, `arc`, `line`, `path`, `text`, `image`, `input` | what gets drawn |
-| `figure hat = file "hat.svg"` | an svg **as geometry**: its layers are paths, so they melt, tint and turn |
-| `body { color/gradient/rim/light/shadow }` | several shapes melted into one silhouette |
-| `row` / `column` | layout, with gap, padding, alignment, `view:` to scroll and `wrap:` for a grid |
-| `component Row(r: record) { … }` | something to copy, with typed parameters and named slots |
-| `on press hit { open = true }` · `every 2s { … }` | rules, run by the renderer |
-| `follow`, `blink`, `wave`, `spin`, `look` | movement that carries itself |
-| `layer`, `gesture`, `posture` | who wins a slot, and timelines |
-| `permissions { run: "date"; services: "audio" }` | undeclared, the logic cannot |
-
-The full reference, with its grammar and its checked examples, is in
-[`docs/11-language-reference.md`][Reference]. To start from zero,
-[`docs/guide.md`][Guide]; to copy and paste, [`docs/recipes.md`](docs/recipes.md).
-
-### The logic
-
-If there is a `bar.luau` next to `bar.plm`, that is its logic: Luau in a
-sandbox, on its own thread, which the renderer never waits for. It can only cross
-the boundary the scene declares — `fact.open = true`, `text.title = …`,
-`model.rows = {…}`, `emit`, and listening with `on(…)` — plus timers, `sys` for
-services and `run` for system commands, all behind permissions. Reference in
-[`docs/10-luau-logic.md`](docs/10-luau-logic.md).
-
-A library with its own `.luau` next to it is a **plugin**: its boundary lives
-under its name (`Clock.now`), it runs on its own thread, and its permissions are
-approved by whoever uses it, with `pleamar --approve`. Unapproved, it runs
-touching nothing.
+Next: the language in five minutes, in **[docs/quick-tour.md](docs/quick-tour.md)**.
 
 # With your AI agent
 
@@ -339,81 +212,27 @@ yours — your mouse and keyboard stay free, the monitor it works on glows while
 it does, and it stops to ask before publishing, sending or buying anything. It
 speaks [Cua Driver](https://github.com/trycua/cua)'s protocol too.
 
+# Community shells
+
+Desktops people have built with pleamar. Each one is its author's, under its own
+license; the picture is the one they posted in the
+[shells forum](https://discord.com/channels/1553805307736494100/1567251125990719519).
+
+| | |
+| --- | --- |
+| <img src="docs/shells/img/vitreus-2026-11-03_12-26-30.jpg" width="320" alt="Vitreus"> | **[Vitreus](https://github.com/natepayn3/Vitreus)** by natepayn3 · a liquid-glass shell for pleamar-wm, Hyprland and niri |
+| <img src="docs/shells/img/beskar-home.jpg" width="320" alt="Beskar"> | **[Beskar](https://github.com/neerajlovecyber/beskar)** by neerajlovecyber · a liquid-glass shell for niri |
+
+All of them, and how to add yours: **[docs/shells.md](docs/shells.md)**.
+
 # Tools
 
-### In the editor
-
-`pleamar --lsp` is a language server over stdio, with this same compiler behind
-it: mistakes as you type, which words fit here, what the word under the cursor
-means, go to where a name was declared, where it is used, and renaming it.
-`pleamar --highlight vim|vscode` writes the syntax file straight from the
-vocabulary, so it cannot fall behind. Both, already generated, in
-[`editor/`](editor/).
-
-For the logic, `pleamar --luau-types scene.plm > pleamar.d.luau` writes a
-definitions file for [luau-lsp](https://github.com/JohnnyMorganz/luau-lsp): the
-globals a logic is given (`fact`, `on`, `sound`, `sys`…), typed, and that
-scene's own facts, texts, models and events, so `fact.` completes and
-`fact.mode = "critcal"` is underlined. How to point an editor at it:
-[docs/10-luau-logic.md](docs/10-luau-logic.md#the-logic-in-your-editor).
-
-### From the source
-
-```sh
-cargo build --release
-./target/release/pleamar --scene examples/bar.plm       # a bar: workspaces, window, time and volume
-./target/release/pleamar --scene examples/long-list.plm # five thousand rows in sixteen copies
-./target/release/pleamar --scene examples/paths.plm     # paths, curves and gradients
-./target/release/pleamar --scene examples/window.plm    # a normal window, with its frame
-./target/release/pleamar --scene examples/icons.plm     # the system tray; right-click opens an icon's menu
-./target/release/pleamar --scene examples/settings.plm  # saves what you pick in its own folder
-./target/release/pleamar --scene examples/tide.plm      # a night sea that rises: a shader, glass, svgs by layers
-./target/release/pleamar --scene examples/catch.plm     # a small game: frames, keys, a game controller, sound
-./target/release/pleamar --check examples/bar.plm       # reads it, says whether it is fine, exits
-./run-tests.sh                                          # the language tests, and the examples in its reference
-```
-
-Rebuild pleamar itself and the running one starts again with the same arguments.
-
-### Day to day
-
-| | |
-| --- | --- |
-| `--screen A,B` | which monitors |
-| `--say NAME …` | talk to a running scene from outside, or from a compositor shortcut; of two scenes with one name, it reaches the one on your terminal's display |
-| `--mouse "360,90@500 click@3200"` | a pretend mouse, to rehearse without touching the real one |
-| `--stall MS` | stall the logic on purpose and watch the screen carry on |
-| `PLEAMAR_GPU=high` | on a laptop with two cards, paint on the fast one. By default pleamar paints on the card the compositor says it paints with, or on the frugal one |
-| `--report` | if something stutters: measures every scene for 30 seconds while you use the desktop and writes down what it saw —frame times, where the late frames went, the card, the CPU's clock and temperature, what else took the CPU— in `~/pleamar-report-….md`, with no personal data. Send it to us in an issue |
-
-# Under the hood
-
-Three threads that never wait for each other: **platform** (windows and input),
-**logic** (Luau) and **render** (owner of the springs and the clock). Plus one
-per plugin, one per service, and a workshop thread for text and images.
-
-| | |
-| --- | --- |
-| `language/` | From text to scene: `tokens` tokenises, `tree` groups without knowing what anything means, `compiler` gives it meaning and checks the names, `vocabulary` is the list of what exists |
-| `scene.rs` | The contract: properties, expressions, drawing instructions, rules, layers, gestures, zones, surfaces |
-| `render.rs` | The interpreter. Still, it does not paint a single frame |
-| `gpu.rs` · `shape.wgsl` | One quad per element; each pixel only runs the shapes of the element covering it |
-| `shapes.rs` | The geometry, written once, used three times: the GPU, the mouse and the bounding boxes |
-| `logic_luau.rs` | A scene's logic: Luau in a sandbox, with the boundary and nothing else |
-| `text.rs` | Real text (`cosmic-text`) and images (SVG, PNG, JPEG) in an atlas at the monitor's scale |
-| `platform/` | The only part that knows about the system: Wayland, the services, files, the clock |
-| `lsp.rs` | The language server and the highlighters, both drawn from the vocabulary |
-
-### What is missing
-
-Measured against two real Quickshell configs (648 QML files between them), in
-[`docs/07-whats-missing.md`](docs/07-whats-missing.md): a live view of a whole
-screen inside the scene (windows come as thumbnails), input methods for Japanese
-or Chinese, and list copies that are born and die on their own.
-
-Known limitations, **each one with its plan to fix it**, in
-[`docs/08-limitations.md`](docs/08-limitations.md). They are written down as
-they show up, not at the end.
+`pleamar --lsp` gives errors and completion in your editor, `pleamar --docs` prints
+the documentation of the version you have, and building from source or day-to-day
+commands are in **[docs/tools.md](docs/tools.md)**. How it works inside:
+**[docs/under-the-hood.md](docs/under-the-hood.md)**; what is missing and the known
+limitations: [`docs/07-whats-missing.md`](docs/07-whats-missing.md),
+[`docs/08-limitations.md`](docs/08-limitations.md).
 
 # Documentation
 
@@ -427,6 +246,13 @@ they show up, not at the end.
 | [`docs/08-limitations.md`](docs/08-limitations.md) | Everything that fails or is missing, with its plan |
 | [`docs/02-how-it-works.md`](docs/02-how-it-works.md) | Inside: the threads, the renderer, the why |
 | [`skill/`](skill/) | The skill the installer gives your AI agents |
+| [`docs/why.md`](docs/why.md) | Why pleamar, with the numbers and the quick comparison |
+| [`docs/quick-tour.md`](docs/quick-tour.md) | The language in five minutes, and the logic |
+| [`docs/install-nix.md`](docs/install-nix.md) | Nix and NixOS |
+| [`docs/tools.md`](docs/tools.md) | The editor, building from source, day to day |
+| [`docs/under-the-hood.md`](docs/under-the-hood.md) | The three threads and the source tree |
+| [`docs/whats-new.md`](docs/whats-new.md) | The highlights of each release line |
+| [`docs/shells.md`](docs/shells.md) | Community shells |
 
 The working notes (01, 03–06, 09) are the design logbook: how this got here.
 
