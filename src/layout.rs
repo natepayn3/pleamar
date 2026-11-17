@@ -11,6 +11,9 @@
 //! text past the edge of its surface), `low_contrast` (letters hard to tell
 //! from what is behind them), `shadow_cut` and `drawing_cut` (the render's own
 //! warnings: a shadow or a shape that needs more room than its surface has).
+//! And `warnings`, nearly right but not quite: `misaligned` (texts whose left
+//! edges are 0.5–2.5 px apart) and `uneven_spacing` (a gap in a column of texts
+//! 1–3 px off the others').
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
@@ -141,6 +144,55 @@ pub fn problems(texts: &[(String, [f32; 4])], surfaces: &[[f32; 4]], contrasts: 
     out
 }
 
+/// What is nearly right but not quite, as warnings: texts whose left edges
+/// are almost on the same line (0.5 to 2.5 px apart: meant to be aligned, and
+/// are not), and, in a column of three or more texts sharing a left edge, a
+/// gap between two of them 1 to 3 px off the others'.
+pub fn alignment(texts: &[(String, [f32; 4])]) -> Vec<serde_json::Value> {
+    use serde_json::json;
+    let mut out = Vec::new();
+    let short = |t: &str| -> String { t.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(30).collect() };
+    let mut told: Vec<(usize, usize)> = Vec::new();
+    for i in 0..texts.len() {
+        for j in i + 1..texts.len() {
+            let d = (texts[i].1[0] - texts[j].1[0]).abs();
+            if d > 0.5 && d <= 2.5 && !told.iter().any(|&(a, b)| a == i || b == j || a == j || b == i) {
+                told.push((i, j));
+                out.push(json!({ "code": "misaligned", "level": "warning", "message": format!("«{}» and «{}» start {d:.1} px apart: put them on the same edge", short(&texts[i].0), short(&texts[j].0)) }));
+            }
+        }
+    }
+    // Columns: texts whose left edges match within half a pixel, top to bottom.
+    let mut done = vec![false; texts.len()];
+    for i in 0..texts.len() {
+        if done[i] {
+            continue;
+        }
+        let mut col: Vec<usize> = (0..texts.len()).filter(|&j| (texts[j].1[0] - texts[i].1[0]).abs() <= 0.5).collect();
+        for &j in &col {
+            done[j] = true;
+        }
+        if col.len() < 3 {
+            continue;
+        }
+        col.sort_by(|&a, &b| texts[a].1[1].total_cmp(&texts[b].1[1]));
+        let gaps: Vec<f32> = col.windows(2).map(|w| texts[w[1]].1[1] - texts[w[0]].1[3]).collect();
+        if gaps.iter().any(|g| *g < 0.0) {
+            continue; // over each other: text_overlap says it
+        }
+        let mut sorted = gaps.clone();
+        sorted.sort_by(f32::total_cmp);
+        let median = sorted[sorted.len() / 2];
+        for (k, g) in gaps.iter().enumerate() {
+            let off = (g - median).abs();
+            if off >= 1.0 && off <= 3.0 {
+                out.push(json!({ "code": "uneven_spacing", "level": "warning", "message": format!("between «{}» and «{}» there are {g:.0} px, and {median:.0} between the others in that column", short(&texts[col[k]].0), short(&texts[col[k + 1]].0)) }));
+            }
+        }
+    }
+    out
+}
+
 /// At the end: the report, as the last line on stdout, and the film gone.
 pub fn finish() {
     use serde_json::json;
@@ -160,6 +212,7 @@ pub fn finish() {
         "surfaces": s.surfaces,
         "texts": s.texts.iter().zip(&contrasts).map(|((t, b), c)| json!({ "text": t, "bounds": b, "contrast": c.map(|c| (c as f64 * 10.0).round() / 10.0) })).collect::<Vec<_>>(),
         "problems": problems,
+        "warnings": alignment(&s.texts),
     });
     if let Some(d) = &s.dir {
         let _ = std::fs::remove_dir_all(d);
@@ -187,6 +240,26 @@ mod tests {
         let p = problems(&texts, &[[0.0, 0.0, 344.0, 164.0]], &[Some(9.0), Some(1.6)]);
         let codes: Vec<&str> = p.iter().map(|x| x["code"].as_str().unwrap()).collect();
         assert_eq!(codes, ["text_outside", "low_contrast"]);
+    }
+
+    #[test]
+    fn nearly_aligned_and_uneven_are_warned_not_exact_ones() {
+        let t = |s: &str, b: [f32; 4]| (s.to_owned(), b);
+        // A column at 16 with one text at 17.5, and gaps of 8, 8 and 10.
+        let texts = [
+            t("Title", [16.0, 10.0, 90.0, 26.0]),
+            t("One", [16.0, 34.0, 60.0, 50.0]),
+            t("Two", [16.0, 58.0, 60.0, 74.0]),
+            t("Three", [16.0, 84.0, 60.0, 100.0]),
+            t("Off", [17.5, 120.0, 60.0, 136.0]),
+        ];
+        let w = alignment(&texts);
+        let codes: Vec<&str> = w.iter().map(|x| x["code"].as_str().unwrap()).collect();
+        assert_eq!(codes, ["misaligned", "uneven_spacing"], "{w:?}");
+        assert!(w[1]["message"].as_str().unwrap().contains("Three"));
+        // Exactly aligned and evenly spaced: nothing.
+        let fine = [t("A", [16.0, 10.0, 40.0, 26.0]), t("B", [16.0, 34.0, 40.0, 50.0]), t("C", [16.0, 58.0, 40.0, 74.0]), t("Far", [120.0, 10.0, 160.0, 26.0])];
+        assert!(alignment(&fine).is_empty());
     }
 
     #[test]
