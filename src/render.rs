@@ -5810,6 +5810,9 @@ pub fn run(
         let knows_where = !all_changed && !draw.timed && !draw.particles_alive && draw.particle_marks.is_empty() && draw.wake_at.is_none();
         // A surface found not shown while painting: the pace is given again after.
         let mut pace_again = false;
+        // The refresh of the one that sets the pace: another surface only waits
+        // for its last frame to be shown when its monitor is slower than that.
+        let lead_mhz = sheets.iter().find(|l| l.drives_pace).map_or(60_000, |l| l.pace_mhz());
         for l in &mut sheets {
             // Closed, it is painted once, empty, and that is it: that, yes, always, whether something changes or not.
             if !l.open && std::mem::replace(&mut l.cleared, true) {
@@ -5941,8 +5944,14 @@ pub fn run(
             // buffer, and that held the whole render to that monitor's pace —a
             // scene on a 165 Hz monitor and a 60 Hz one went at 60 on both—.
             // Not beyond a while: what is not shown is never answered.
+            // Only on a slower monitor, though: two monitors at the same rate
+            // are never in step, and the answer for the other one tends to come
+            // just after the next round starts, so it skipped every other round
+            // and went at half the rate (30 fps on the second of two 60 Hz
+            // monitors). At the same rate it keeps up with the pace by itself.
             let others = !l.drives_pace && g.uses_mailbox() && !op.no_vsync && !op.naive;
-            if others && l.open && in_flight.iter().any(|f| f.0 == l.id && crate::clock::since(f.1) < Duration::from_millis(100)) {
+            let slower = (l.pace_mhz() as i64) * 100 < (lead_mhz as i64) * 95;
+            if others && slower && l.open && in_flight.iter().any(|f| f.0 == l.id && crate::clock::since(f.1) < Duration::from_millis(100)) {
                 if !owed.contains(&l.id) {
                     owed.push(l.id);
                 }
