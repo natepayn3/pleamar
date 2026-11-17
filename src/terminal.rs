@@ -456,6 +456,8 @@ pub struct Registry {
     pub window_keys: bool,
     /// The focus its programs were last told of (`\e[I`, `\e[O`).
     told_focus: Option<&'static str>,
+    /// Those that started nothing, the scene having no permissions (said once).
+    refused: Vec<&'static str>,
 }
 
 static REGISTRY: OnceLock<Mutex<Registry>> = OnceLock::new();
@@ -704,6 +706,12 @@ pub fn sync(placed: &[PlacedTerminal], runs: &[(&'static str, bool)]) {
             let size = WindowSize { num_cols: t.cols, num_lines: t.rows, cell_width: t.cell.0.round().max(1.0) as u16, cell_height: t.cell.1.round().max(1.0) as u16 };
             match r.sessions.get_mut(t.name) {
                 Some(s) => s.resize(size),
+                None if t.run && crate::permissions::none() => {
+                    if !r.refused.contains(&t.name) {
+                        r.refused.push(t.name);
+                        println!("terminal · '{}' starts nothing: this scene runs with no permissions", t.name);
+                    }
+                }
                 None if t.run && !runs.iter().any(|(n, run)| n == &t.name && !run) => {
                     let folder = t.folder.as_deref().filter(|f| !f.is_empty()).map(expand);
                     let env: Vec<(String, String)> = t.env.as_deref().unwrap_or("").lines().filter_map(|l| l.split_once('=')).filter(|(k, _)| !k.trim().is_empty()).map(|(k, v)| (k.trim().to_owned(), v.to_owned())).collect();

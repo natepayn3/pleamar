@@ -10,6 +10,29 @@ use crate::scene::{Permissions, Plugin};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+/// `--no-permissions` (and `--layout`, which paints a scene nobody approved
+/// yet to say how it is laid out): the scene's logic, its pieces' and its
+/// plugins' have none —no `run`, no `spawn`, no service, so no network either—
+/// and its terminals start no program. Whatever the scene declares.
+static NONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn grant_none() {
+    NONE.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+pub fn none() -> bool {
+    NONE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// What the logic is given: what was declared or approved, or nothing at all.
+pub fn granted(p: Permissions) -> Permissions {
+    granted_if(none(), p)
+}
+
+fn granted_if(none: bool, p: Permissions) -> Permissions {
+    if none { Permissions::default() } else { p }
+}
+
 /// What runs anything it is told: asking for it is asking for everything.
 const INTERPRETERS: [&str; 12] = ["sh", "bash", "zsh", "fish", "dash", "python", "python3", "perl", "ruby", "node", "lua", "env"];
 
@@ -238,6 +261,13 @@ pub fn ask(scene: &str, yes_to_all: bool, only: Option<&str>, json: bool) -> i32
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn with_none_granted_nothing_is_given() {
+        let p = crate::scene::Permissions { commands: vec!["touch".into()], services: vec!["files.write".into()], env: vec![] };
+        assert_eq!(super::granted_if(false, p.clone()), p);
+        assert_eq!(super::granted_if(true, p), crate::scene::Permissions::default());
+    }
+
     use super::{Permissions, describe, env_refused};
 
     #[test]

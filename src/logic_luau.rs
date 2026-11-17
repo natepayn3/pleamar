@@ -802,7 +802,7 @@ impl LuauScript {
         let mut c = self.c.lock().unwrap();
         c.facts = e.facts.iter().map(|(n, v)| (n.to_string(), *v as f64)).collect();
         c.texts = e.texts.iter().map(|(n, v)| (n.to_string(), v.clone())).collect();
-        c.permissions = permissions;
+        c.permissions = crate::permissions::granted(permissions);
         c.models = e.models.clone();
         c.types = e.types.iter().cloned().collect();
         c.signals = e.signals.iter().map(|s| s.0.to_owned()).collect();
@@ -2020,6 +2020,7 @@ impl Script for LuauScript {
                 c.signals = signals.iter().map(|s| (*s).to_owned()).collect();
                 c.translations = translations;
                 // Permissions are indeed replaced: removing one from the scene removes it right away.
+                let permissions = crate::permissions::granted(permissions);
                 if c.permissions != permissions {
                     println!("logic  · permissions now: {}", describe(&permissions));
                     c.permissions = permissions;

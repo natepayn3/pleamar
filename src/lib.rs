@@ -136,7 +136,10 @@ const HELP: &str = "pleamar [options]
                       (.mp4 .webm .mkv .mov .gif, with ffmpeg); the keys pressed, the clicks and the
                       pointer are drawn on it. As long as --seconds says, or the script plus a second
   --fps N             frames per second of a film (60)
-  --layout SCENE      paints the scene a moment with no screen and says, as the last line (JSON),
+  --no-permissions    the scene's logic has none, whatever it declares (no run, spawn or service:
+                      no network either), and its terminals start nothing: to look at a scene
+                      nobody approved yet
+  --layout SCENE      (with no permissions) paints the scene a moment with no screen and says, as the last line (JSON),
                       how it is laid out: texts over each other, past their surface, hard to read,
                       a shadow or a drawing its surface cuts
 Right-click closes it, if the scene does not use the right button for anything.";
@@ -296,6 +299,7 @@ fn args(given: Vec<String>) -> Args {
                 a.scene = value();
                 a.layout = true;
             }
+            "--no-permissions" => permissions::grant_none(),
             "--fps" => a.fps = value().parse().ok().filter(|f: &u32| (1..=240).contains(f)).expect("--fps wants frames per second, from 1 to 240"),
             "--record" => a.record = value().split(',').map(|s| s.trim().to_owned()).filter(|s| !s.is_empty()).collect(),
             _ => { eprintln!("{HELP}"); std::process::exit(2) }
@@ -430,6 +434,8 @@ pub fn run_with(options: Vec<String>) {
     let mut a = args(options);
     // `--layout`: a film of a moment, to a folder of its own, and the report at the end.
     if a.layout {
+        // A scene nobody approved yet (an agent's draft): painted with no permissions at all.
+        permissions::grant_none();
         a.film = Some(layout::start());
         a.fps = 10;
         a.seconds = a.seconds.or(Some(1.0));
