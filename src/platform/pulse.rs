@@ -50,6 +50,20 @@ impl Pulse {
         protocol::read_reply_message::<T>(&mut self.sock, self.version).map(|(_, t)| t).map_err(|e| e.to_string())
     }
 
+    /// `ask`, but for no longer than `wait`: `None` when the server said nothing in that time.
+    /// A read with no limit waits for ever on a server that never answers (a sink that went
+    /// away as the question was asked), and the connection is no use after a reply missed:
+    /// the caller drops it.
+    fn ask_within<T: protocol::CommandReply>(&mut self, c: Command, wait: std::time::Duration) -> R<Option<T>> {
+        self.sock.get_ref().set_read_timeout(Some(wait)).map_err(|e| e.to_string())?;
+        let started = std::time::Instant::now();
+        match self.ask::<T>(c) {
+            Ok(t) => Ok(Some(t)),
+            Err(_) if started.elapsed() >= wait.mul_f32(0.9) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
     fn ack(&mut self, c: Command) -> R<()> {
         self.send(&c)?;
         protocol::read_ack_message(&mut self.sock).map(|_| ()).map_err(|e| e.to_string())
@@ -239,6 +253,11 @@ impl Meter {
 /// event a few dozen; a length past this is a stream out of step, not data.
 const LEVEL_PACKET_MAX: u32 = 1 << 20;
 
+/// The longest the server is waited for to answer, before the stream and for it. An output
+/// that is suspended may answer late, so this is long: a miss is not an error, the stream
+/// is asked for again on a new connection (see `level_service`).
+const LEVEL_REPLY_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
+
 fn tell_level(dispatch: &dyn Fn(SysValue), v: Option<f64>) {
     if let Some(v) = v {
         dispatch(SysValue::Map(vec![("level".into(), SysValue::Num(v))]));
@@ -265,6 +284,9 @@ pub fn level_service(dispatch: Box<dyn Fn(SysValue) + Send>) -> bool {
             loop {
                 let mut run = || -> R<()> {
                     let mut p = Pulse::connect("pleamar level")?;
+                    // The server may never answer (pleamar#164: an output that went away
+                    // as the stream was asked for): no wait is for ever.
+                    p.sock.get_ref().set_read_timeout(Some(LEVEL_REPLY_WAIT)).map_err(|e| e.to_string())?;
                     let (server, sinks, _) = p.state()?;
                     // With no default output, the first one; a default named
                     // later differs from none, so it is followed all the same.
@@ -272,7 +294,7 @@ pub fn level_service(dispatch: Box<dyn Fn(SysValue) + Send>) -> bool {
                     let monitor = sink.monitor_source_index.ok_or("the output has no monitor")?;
                     let mut props = Props::new();
                     props.set(Prop::MediaName, CString::new("level").unwrap_or_default());
-                    let stream = p.ask::<protocol::CreateRecordStreamReply>(Command::CreateRecordStream(protocol::RecordStreamParams {
+                    let Some(stream) = p.ask_within::<protocol::CreateRecordStreamReply>(Command::CreateRecordStream(protocol::RecordStreamParams {
                         source_index: Some(monitor),
                         sample_spec: protocol::SampleSpec { format: protocol::SampleFormat::Float32Le, channels: 1, sample_rate: LEVEL_RATE },
                         channel_map: protocol::ChannelMap::mono(),
@@ -281,7 +303,12 @@ pub fn level_service(dispatch: Box<dyn Fn(SysValue) + Send>) -> bool {
                         flags: protocol::stream::StreamFlags { peak_detect: true, adjust_latency: true, no_move: true, no_inhibit_auto_suspend: true, ..Default::default() },
                         props,
                         ..Default::default()
-                    }))?;
+                    }), LEVEL_REPLY_WAIT)? else {
+                        // No answer in time: not told as a failure (an idle output may answer
+                        // only once something plays). The stream is asked for again, on a new
+                        // connection, with no pause: this one cannot be read on.
+                        return Ok(());
+                    };
                     tell_level(&*dispatch, meter.silence());
                     // Told when the default output changes, on this connection, asked
                     // last: an event coming while a reply is awaited would be taken for
@@ -446,6 +473,32 @@ pub fn command(what: &str, args: &[SysValue]) -> R<()> {
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};
+
+    /// A connection to nobody's server: what is written goes to the other end, which the test holds.
+    fn silent_server() -> (Pulse, UnixStream) {
+        let (a, b) = UnixStream::pair().unwrap();
+        (Pulse { sock: BufReader::new(a), version: protocol::MAX_VERSION, seq: 1 }, b)
+    }
+
+    /// pleamar#164: a server that never answers the stream is waited for a while, not for ever.
+    #[test]
+    fn a_server_that_says_nothing_is_a_miss_after_the_wait() {
+        let (mut p, _server) = silent_server();
+        let t = Instant::now();
+        let got = p.ask_within::<protocol::ServerInfo>(Command::GetServerInfo, Duration::from_millis(200)).unwrap();
+        assert!(got.is_none(), "no answer is None");
+        assert!(t.elapsed() >= Duration::from_millis(180) && t.elapsed() < Duration::from_secs(5), "{:?}", t.elapsed());
+    }
+
+    /// A server that hangs up is an error at once (the loop starts again after its pause), not a miss.
+    #[test]
+    fn a_server_that_hangs_up_is_an_error_not_a_miss() {
+        let (mut p, server) = silent_server();
+        drop(server);
+        let t = Instant::now();
+        assert!(p.ask_within::<protocol::ServerInfo>(Command::GetServerInfo, Duration::from_secs(10)).is_err());
+        assert!(t.elapsed() < Duration::from_secs(2), "{:?}", t.elapsed());
+    }
 
     #[test]
     fn a_packet_of_readings_gives_its_loudest() {
