@@ -1648,15 +1648,30 @@ fn animation_frames(path: &std::path::Path, px: (u32, u32), sharp: bool) -> Opti
 /// An RGBA image fitted into `px` without distorting, centred, premultiplied.
 /// `sharp`: each of its pixels stays a square, for pixel art made bigger.
 fn fit(img: image::RgbaImage, px: (u32, u32), sharp: bool) -> Vec<u8> {
+    fit_decoded(image::DynamicImage::ImageRgba8(img), px, sharp)
+}
+
+/// `fit`, from an image as it was decoded, with as few whole copies of it at once as can be (#161): made
+/// smaller first, in its own kind of pixels (a JPEG's three bytes, not four), the decoded one let go
+/// before it is turned into RGBA (no copy if it already is), put on a canvas only to be centred in a box
+/// of another shape, and premultiplied where it is. A photo of 8084 × 6264 had four of 200 MB at once.
+fn fit_decoded(img: image::DynamicImage, px: (u32, u32), sharp: bool) -> Vec<u8> {
     let k = (px.0 as f32 / img.width() as f32).min(px.1 as f32 / img.height() as f32);
     let (w, h) = (((img.width() as f32 * k).round() as u32).clamp(1, px.0), ((img.height() as f32 * k).round() as u32).clamp(1, px.1));
-    let reduced = image::imageops::resize(&img, w, h, if sharp { image::imageops::FilterType::Nearest } else { image::imageops::FilterType::Triangle });
-    let mut canvas = image::RgbaImage::new(px.0, px.1);
-    image::imageops::overlay(&mut canvas, &reduced, ((px.0 - w) / 2) as i64, ((px.1 - h) / 2) as i64);
-    canvas.pixels().flat_map(|p| {
+    let img = if (w, h) == (img.width(), img.height()) { img } else { img.resize_exact(w, h, if sharp { image::imageops::FilterType::Nearest } else { image::imageops::FilterType::Triangle }) };
+    let mut rgba = img.into_rgba8();
+    if (w, h) != px {
+        let mut canvas = image::RgbaImage::new(px.0, px.1);
+        image::imageops::overlay(&mut canvas, &rgba, ((px.0 - w) / 2) as i64, ((px.1 - h) / 2) as i64);
+        rgba = canvas;
+    }
+    for p in rgba.pixels_mut() {
         let a = p[3] as u16;
-        [(p[0] as u16 * a / 255) as u8, (p[1] as u16 * a / 255) as u8, (p[2] as u16 * a / 255) as u8, p[3]]
-    }).collect()
+        if a < 255 {
+            *p = image::Rgba([(p[0] as u16 * a / 255) as u8, (p[1] as u16 * a / 255) as u8, (p[2] as u16 * a / 255) as u8, p[3]]);
+        }
+    }
+    rgba.into_raw()
 }
 
 /// A window's frame —premultiplied BGRA, as the compositor copies it— to
@@ -1858,7 +1873,7 @@ fn rasterize_bytes(data: &[u8], is_svg: bool, px: (u32, u32), sharp: bool) -> Op
         resvg::render(&tree, resvg::tiny_skia::Transform::from_scale(k, k).post_translate(dx, dy), &mut canvas.as_mut());
         return Some(canvas.take()); // tiny-skia already premultiplies
     }
-    Some(fit(image::load_from_memory(data).ok()?.to_rgba8(), px, sharp))
+    Some(fit_decoded(image::load_from_memory(data).ok()?, px, sharp))
 }
 
 #[cfg(test)]
@@ -2294,6 +2309,19 @@ mod tests {
         }
         assert!(texts.generation >= initial + 3, "fixture did not exhaust the atlas repeatedly");
         std::fs::remove_dir(dir).unwrap();
+    }
+
+    #[test]
+    fn decoding_with_fewer_copies_gives_the_same_pixels() {
+        // #161: made smaller in its own kind of pixels (RGB) and premultiplied in place, a photo comes out
+        // byte for byte as when it was turned into RGBA first; letterboxed or not, and one with alpha too.
+        let rgb = image::RgbImage::from_fn(317, 211, |x, y| image::Rgb([(x * 7 % 256) as u8, (y * 13 % 256) as u8, ((x ^ y) % 256) as u8]));
+        let rgba = image::RgbaImage::from_fn(317, 211, |x, y| image::Rgba([(x * 3 % 256) as u8, (y * 5 % 256) as u8, 90, ((x + y) % 256) as u8]));
+        for px in [(100, 66), (100, 100), (317, 211), (400, 300)] {
+            let before = fit(image::DynamicImage::ImageRgb8(rgb.clone()).to_rgba8(), px, false);
+            assert_eq!(fit_decoded(image::DynamicImage::ImageRgb8(rgb.clone()), px, false), before, "rgb at {px:?}");
+            assert_eq!(fit_decoded(image::DynamicImage::ImageRgba8(rgba.clone()), px, false), fit(rgba.clone(), px, false), "rgba at {px:?}");
+        }
     }
 
     #[test]
