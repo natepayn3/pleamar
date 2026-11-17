@@ -1491,10 +1491,10 @@ mod tests {
     fn words_go_to_their_zone_or_stand_alone() {
         // «Close» drawn on the close button; «Ready» drawn where no zone is.
         let seen = [
-            SeenText { at: 0, text: "Close".into(), bounds: [362.0, 15.0, 388.0, 35.0], clipped: false },
-            SeenText { at: 1, text: "Ready".into(), bounds: [20.0, 200.0, 70.0, 220.0], clipped: false },
+            SeenText { at: 0, text: "Close".into(), bounds: [362.0, 15.0, 388.0, 35.0], ink: [362.0, 15.0, 388.0, 35.0], clipped: false },
+            SeenText { at: 1, text: "Ready".into(), bounds: [20.0, 200.0, 70.0, 220.0], ink: [20.0, 200.0, 70.0, 220.0], clipped: false },
             // Cut out by a clip, and no row of a list to be: nobody's.
-            SeenText { at: 2, text: "Gone".into(), bounds: [20.0, 160.0, 70.0, 180.0], clipped: true },
+            SeenText { at: 2, text: "Gone".into(), bounds: [20.0, 160.0, 70.0, 180.0], ink: [20.0, 160.0, 70.0, 180.0], clipped: true },
         ];
         let parts = told_with(false, &seen);
         assert_eq!(node(&parts, "close").unwrap().label, "Close");

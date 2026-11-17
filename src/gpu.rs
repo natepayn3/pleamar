@@ -498,6 +498,10 @@ pub struct SeenText {
     pub at: usize,
     pub text: String,
     pub bounds: [f32; 4],
+    /// Where its letters are, within that box: from the start of its widest line to
+    /// its end, from its first line's top to its last's bottom. A text given a wide
+    /// `width` with a word in it has a wide box and a narrow `ink` (`--layout` reads it).
+    pub ink: [f32; 4],
     /// Cut out by a clip: a row scrolled out of its list. Only that row's.
     pub clipped: bool,
 }
@@ -1864,7 +1868,7 @@ impl DrawList {
                 }
             }
             if self.collect_texts && !seen_text.trim().is_empty() {
-                self.texts_seen.push(SeenText { at: idx, text: seen_text.trim_end().to_owned(), bounds: limit, clipped: false });
+                self.texts_seen.push(SeenText { at: idx, text: seen_text.trim_end().to_owned(), bounds: limit, ink: limit, clipped: false });
             }
         }
         clips.pop();
@@ -3449,7 +3453,18 @@ impl DrawList {
                         // Cut out by a clip, it is not seen: a row scrolled out of its list.
                         let seen = limit.is_none_or(|l| b[0] < l[2] && b[2] > l[0] && b[1] < l[3] && b[3] > l[1]);
                         if !text.trim().is_empty() {
-                            self.texts_seen.push(SeenText { at: idx, text: text.to_owned(), bounds: b, clipped: !seen });
+                            // Its letters: each line from its first cursor to its last.
+                            let (mut l, mut r, mut t, mut d) = (f32::MAX, f32::MIN, f32::MAX, f32::MIN);
+                            for line in &m.lines {
+                                if let (Some(a), Some(z)) = (line.cursors.first(), line.cursors.last()) {
+                                    l = l.min(a.1.min(z.1));
+                                    r = r.max(a.1.max(z.1));
+                                    t = t.min(line.top);
+                                    d = d.max(line.bottom);
+                                }
+                            }
+                            let ink = if r > l && d > t { affine.bounds([x0 + l, y0 + t, x0 + r, y0 + d]) } else { b };
+                            self.texts_seen.push(SeenText { at: idx, text: text.to_owned(), bounds: b, ink, clipped: !seen });
                         }
                     }
                     // Its pictures (`images:`), each in the room its lines make, as wide as the text

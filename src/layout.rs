@@ -48,7 +48,9 @@ pub fn on() -> bool {
 /// out of sight) and where its surfaces are.
 pub fn texts(seen: &[crate::gpu::SeenText], surfaces: Vec<[f32; 4]>) {
     let mut s = SEEN.lock().unwrap();
-    s.texts = seen.iter().filter(|t| !t.clipped && !t.text.trim().is_empty()).map(|t| (t.text.clone(), t.bounds)).collect();
+    // Where its letters are, not the box it was given: a word in a wide `width` is
+    // that word, for what it covers, where it ends and how it stands out.
+    s.texts = seen.iter().filter(|t| !t.clipped && !t.text.trim().is_empty()).map(|t| (t.text.clone(), t.ink)).collect();
     s.surfaces = surfaces;
 }
 
