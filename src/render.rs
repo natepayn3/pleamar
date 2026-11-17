@@ -4894,6 +4894,10 @@ pub fn run(
         if reader_on && reader_dirty && crate::clock::now() >= reader_next {
             draw.collect_texts = true;
         }
+        // `--layout`: the words as painted, every round, for the report at the end.
+        if crate::layout::on() {
+            draw.collect_texts = true;
+        }
         let term_versions = crate::terminal::versions(&draw.terminals);
         let same_scene = !draw.timed
             && !draw.particles_alive
@@ -4923,6 +4927,9 @@ pub fn run(
             }
             compose_seen.reset(facts.len(), props.len());
             draw.compose(to_paint, Ctx { seen: Some(&compose_seen), ..c }, &texts, &mut letters, view.clone(), size, op.hud);
+            if crate::layout::on() {
+                crate::layout::texts(&draw.texts_seen, sheets.iter().filter(|s| s.open).map(|s| s.view.bounds()).collect());
+            }
             stretches_copied += draw.copied.0 as u64;
             stretches_made += draw.copied.1 as u64;
             // The input method is told which field is being written in and where its

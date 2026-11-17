@@ -169,6 +169,9 @@ scene Name {
   seconds and never against an edge the surface is glued to. Only while it
   runs, though, never in `--check`: where a card ends is a sum that exists
   only while the scene is alive.
+  `pleamar --layout x.plm` paints it a moment with no screen and says it in
+  JSON (its last line), with texts drawn over each other, past their surface or
+  hard to read: run it after `--check` on anything with text in it.
 - **Zones are what catch the mouse.** A named shape only becomes a zone if a rule
   names it, if it carries `active`, or if it is declared with `zone`.
 - **Say what a zone is when no word is drawn in it.** An agent or a screen

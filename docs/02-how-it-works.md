@@ -197,6 +197,12 @@ To see it without a screen, film it: on a virtual clock, so the same scene and s
 
 A film is not a sandbox: the logic does what it does, so an Enter in a launcher launches the program.
 
+To know whether it is laid out well without looking at it, ask for its layout: it is filmed a moment the same way, and the last line it prints is one JSON object with each text as painted (`bounds`, and how well its letters stand out from what is behind them, `contrast`) and the problems found: `text_overlap` (two texts over each other), `text_outside` (past the edge of its surface), `low_contrast` (under 3:1), `shadow_cut` and `drawing_cut` (a shadow or a shape that needs more room than its surface has).
+
+```sh
+./target/release/pleamar --layout widget.plm | tail -n 1 | jq '.problems'
+```
+
 It comes up where the scene asks; `--screen NAME` puts it on another monitor. The graph at the bottom is one bar per frame; the red band is the time with the logic blocked. **Do not measure while capturing with `grim`**: it causes dropped frames.
 
 ## Known debts

@@ -1975,6 +1975,7 @@ impl DrawList {
         if told.is_empty() {
             return;
         }
+        crate::layout::note("shadow_cut", format!("a shadow is cut: it needs {} more than this {:.0} x {:.0} surface has. The shape fits; its shadow does not", told.join(" and "), w, height));
         self.shadow.note(worst, || {
             format!(
                 "render · a shadow is cut: it needs {} more than this {:.0} x {:.0} surface has. The shape fits; its shadow does not",
@@ -2016,6 +2017,7 @@ impl DrawList {
             return;
         }
         let worst = (0..4).filter(|&k| counts(k)).map(|k| missing[k]).fold(0.0f32, f32::max);
+        crate::layout::note("drawing_cut", format!("a drawing is cut: it needs {} more than this {:.0} x {:.0} surface has. Almost all of it is inside, so it looks like the surface is the one that fell short", told.join(" and "), w, height));
         self.clipping.note(worst, || {
             format!(
                 "render · a drawing is cut: it needs {} more than this {:.0} x {:.0} surface has. Almost all of it is inside, so it looks like the surface is the one that fell short",

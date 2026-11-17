@@ -229,6 +229,7 @@ impl Film {
                 }
             }
         }
+        crate::layout::frame(&frame, w, h, x0, y0);
         let t = crate::clock::gone().as_secs_f32();
         self.draw_marks(&mut frame, (w, h), (x0, y0), t);
         if let Err(e) = self.put(&frame, (w, h)) {

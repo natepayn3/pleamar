@@ -24,6 +24,7 @@ mod alloc_report;
 mod a11y;
 #[cfg(target_os = "linux")]
 pub mod dmabuf;
+mod layout;
 mod lens;
 mod markdown;
 mod language;
@@ -135,6 +136,9 @@ const HELP: &str = "pleamar [options]
                       (.mp4 .webm .mkv .mov .gif, with ffmpeg); the keys pressed, the clicks and the
                       pointer are drawn on it. As long as --seconds says, or the script plus a second
   --fps N             frames per second of a film (60)
+  --layout SCENE      paints the scene a moment with no screen and says, as the last line (JSON),
+                      how it is laid out: texts over each other, past their surface, hard to read,
+                      a shadow or a drawing its surface cuts
 Right-click closes it, if the scene does not use the right button for anything.";
 
 struct Args {
@@ -156,13 +160,15 @@ struct Args {
     answer_as: Option<String>,
     /// `--film OUT`: filmed on a virtual clock, to a folder of PNGs or a video.
     film: Option<String>,
+    /// `--layout SCENE`: filmed a moment to say how it is laid out (layout.rs).
+    layout: bool,
     fps: u32,
     /// Whether `--stall` was said: a film does not stall unless asked.
     stall_said: bool,
 }
 
 fn args(given: Vec<String>) -> Args {
-    let mut a = Args { scene: String::new(), screen: None, stall: 600, naive: false, demo: false, mouse: None, seconds: None, margin: None, hud: true, reduced: false, no_vsync: false, record: Vec::new(), answer_as: None, film: None, fps: 60, stall_said: false };
+    let mut a = Args { scene: String::new(), screen: None, stall: 600, naive: false, demo: false, mouse: None, seconds: None, margin: None, hud: true, reduced: false, no_vsync: false, record: Vec::new(), answer_as: None, film: None, layout: false, fps: 60, stall_said: false };
     let mut it = given.into_iter();
     while let Some(op) = it.next() {
         let mut value = || it.next().unwrap_or_else(|| { eprintln!("{HELP}"); std::process::exit(2) });
@@ -286,6 +292,10 @@ fn args(given: Vec<String>) -> Args {
             "--reduced-motion" => a.reduced = true,
             "--no-vsync" => a.no_vsync = true,
             "--film" => a.film = Some(value()),
+            "--layout" => {
+                a.scene = value();
+                a.layout = true;
+            }
             "--fps" => a.fps = value().parse().ok().filter(|f: &u32| (1..=240).contains(f)).expect("--fps wants frames per second, from 1 to 240"),
             "--record" => a.record = value().split(',').map(|s| s.trim().to_owned()).filter(|s| !s.is_empty()).collect(),
             _ => { eprintln!("{HELP}"); std::process::exit(2) }
@@ -418,6 +428,13 @@ fn graphics_instance(flags: wgpu::InstanceFlags) -> wgpu::Instance {
 pub fn run_with(options: Vec<String>) {
     let start_time = std::time::Instant::now();
     let mut a = args(options);
+    // `--layout`: a film of a moment, to a folder of its own, and the report at the end.
+    if a.layout {
+        a.film = Some(layout::start());
+        a.fps = 10;
+        a.seconds = a.seconds.or(Some(1.0));
+        a.mouse = None;
+    }
     // No terminal to be stopped on, for the programs it starts.
     platform::leave_terminal();
     // The agents' skill, written again if this pleamar is not the one it speaks of. Not by a
@@ -863,6 +880,7 @@ fn quit_after_render(tx: &std::sync::mpsc::Sender<ToRender>) -> ! {
 
 fn quit() -> ! {
     platform::film::finish();
+    layout::finish();
     if let Some(f) = BEFORE_QUIT.lock().unwrap().take() {
         f();
     }
