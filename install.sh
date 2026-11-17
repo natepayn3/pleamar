@@ -190,7 +190,15 @@ else
 fi
 (cd "$src/pleamar" && cargo build --release --quiet) || fail "pleamar did not build"
 if ! $alone; then
-    (cd "$src/pleamar-wm" && cargo build --release --quiet) || fail "pleamar-wm did not build"
+    # The experimental pleamar (`desk = true` in its Cargo.toml, as pleamar-wm's build.rs reads it) needs pleamar-wm built with
+    # `--features exp`: without it the build stops on the `desk` slots it does not cover. pleamar main has no such line.
+    wmfeatures=""
+    if grep -qE '^[[:space:]]*desk[[:space:]]*=[[:space:]]*true' "$src/pleamar/Cargo.toml"; then
+        wmfeatures="--features exp"
+        say "pleamar-wm: built with --features exp (this is the experimental pleamar)"
+    fi
+    # shellcheck disable=SC2086
+    (cd "$src/pleamar-wm" && cargo build --release --quiet $wmfeatures) || fail "pleamar-wm did not build"
     # The remote desktop's video (pleamar-wm-stream): it needs ffmpeg's
     # development files; without them the remote uses wf-recorder.
     if $remote || [ -x "$bin/pleamar-wm-stream" ]; then
