@@ -5812,7 +5812,7 @@ pub fn run(
         let mut pace_again = false;
         // The refresh of the one that sets the pace: another surface only waits
         // for its last frame to be shown when its monitor is slower than that.
-        let lead_mhz = sheets.iter().find(|l| l.drives_pace).map_or(60_000, |l| l.pace_mhz());
+        let lead_mhz = lead_pace_mhz(sheets.iter().map(|l| (l.drives_pace, l.pace_mhz())));
         for l in &mut sheets {
             // Closed, it is painted once, empty, and that is it: that, yes, always, whether something changes or not.
             if !l.open && std::mem::replace(&mut l.cleared, true) {
@@ -5950,8 +5950,7 @@ pub fn run(
             // and went at half the rate (30 fps on the second of two 60 Hz
             // monitors). At the same rate it keeps up with the pace by itself.
             let others = !l.drives_pace && g.uses_mailbox() && !op.no_vsync && !op.naive;
-            let slower = (l.pace_mhz() as i64) * 100 < (lead_mhz as i64) * 95;
-            if others && slower && l.open && in_flight.iter().any(|f| f.0 == l.id && crate::clock::since(f.1) < Duration::from_millis(100)) {
+            if others && waits_for_its_last_frame(l.pace_mhz(), lead_mhz) && l.open && in_flight.iter().any(|f| f.0 == l.id && crate::clock::since(f.1) < Duration::from_millis(100)) {
                 if !owed.contains(&l.id) {
                     owed.push(l.id);
                 }
@@ -6508,6 +6507,20 @@ struct Multi<'a> {
 /// Returns whether it has to paint.
 /// What changed in a sheet's piece that it has not painted yet (`Sheet::owed_damage`).
 /// Past a few dozen boxes, one round them all.
+/// The refresh, in millihertz, of the surface that sets the pace (`drives_pace`): 60 Hz if none does.
+/// The others' monitors are compared with it.
+fn lead_pace_mhz(sheets: impl Iterator<Item = (bool, i32)>) -> i32 {
+    sheets.into_iter().find(|s| s.0).map_or(60_000, |s| s.1)
+}
+
+/// Whether a copy that does not set the pace skips its round while its last frame has not been shown
+/// (`pace_mhz`: its monitor's refresh; `lead_mhz`: that of the one that sets the pace). Only if its
+/// monitor is slower, by more than 5 %: two monitors at the same rate are never in step, and
+/// waiting for the other's answer made it skip every other round; 59.95 Hz and 60 Hz are the same rate.
+fn waits_for_its_last_frame(pace_mhz: i32, lead_mhz: i32) -> bool {
+    (pace_mhz as i64) * 100 < (lead_mhz as i64) * 95
+}
+
 fn owe(l: &mut Sheet, rects: impl Iterator<Item = [f32; 4]>) {
     l.owed_damage.extend(rects);
     if l.owed_damage.len() > 32 {
@@ -8766,5 +8779,40 @@ mod motion_tests {
         }
         assert!(worst_seen < 0.01, "by when seen, off by {worst_seen}");
         assert!(worst_made > 1.0, "by when made, off by only {worst_made}");
+    }
+}
+
+#[cfg(test)]
+mod pace_tests {
+    use super::*;
+
+    #[test]
+    fn two_monitors_at_the_same_rate_do_not_wait_for_each_other() {
+        assert!(!waits_for_its_last_frame(60_000, 60_000));
+        // 59.95 Hz against 60 Hz is the same rate (#162): that was the half-rate copy.
+        assert!(!waits_for_its_last_frame(59_950, 60_000));
+        assert!(!waits_for_its_last_frame(57_000, 60_000), "exactly 5 % less still counts as the same");
+    }
+
+    #[test]
+    fn a_faster_monitor_does_not_wait() {
+        assert!(!waits_for_its_last_frame(165_000, 60_000));
+    }
+
+    #[test]
+    fn a_slower_monitor_waits_for_its_last_frame() {
+        assert!(waits_for_its_last_frame(60_000, 165_000));
+        assert!(waits_for_its_last_frame(56_999, 60_000), "just under the 5 %");
+        assert!(waits_for_its_last_frame(30_000, 60_000));
+    }
+
+    #[test]
+    fn the_one_that_sets_the_pace_is_the_first_that_says_so_or_sixty_hertz() {
+        assert_eq!(lead_pace_mhz([(false, 144_000), (true, 165_000), (true, 75_000)].into_iter()), 165_000);
+        assert_eq!(lead_pace_mhz([(false, 144_000), (false, 30_000)].into_iter()), 60_000, "none sets it: 60 Hz");
+        assert_eq!(lead_pace_mhz(std::iter::empty()), 60_000);
+        // With no lead, a 59.95 Hz copy is the same rate as the default and a 30 Hz one is slower.
+        assert!(!waits_for_its_last_frame(59_950, lead_pace_mhz(std::iter::empty())));
+        assert!(waits_for_its_last_frame(30_000, lead_pace_mhz(std::iter::empty())));
     }
 }
