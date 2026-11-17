@@ -795,6 +795,21 @@ monitor, whatever its shape, from the file's own pixels:
 screen.width, screen.height; fit: cover }`. The shape `fit:` keeps is the
 image's cell: with a declared size, that one (and a sheet's `cell:`).
 
+An image declared `0, 0` that is **only** drawn with `fit: contain` or `fit:
+cover` (and no `cell:`) is read **the size of its box**, not whole: the
+pixels it needs to fill the biggest box it is drawn in, in real pixels (the
+monitor's scale and a group's scale counted), never more than the file has.
+A photo of 8084 × 6264 covering a 1920 × 1080 monitor is 1920 × 1488 on the
+card, 11 MB instead of 200, and what is too fine to be seen (lines of one
+pixel) is averaged into its colour instead of shimmering. It is read when it
+is first drawn, not when the scene loads. If its box grows (another monitor,
+a bigger scale, a `size:` that grows) it is read again for it; one whose box
+keeps growing —read twice more— is taken to be one the scene enlarges on
+purpose (a zoom, a map) and is read whole from then on. Drawn anywhere with
+`fit: fill` (or no `fit:`), with a declared size, as pixel art (`pixels`), or
+from a file that moves (GIF, an animated PNG or WebP), it is the file's own
+pixels, as before.
+
 **From memory: `data "me"`** instead of `file`. The logic hands the picture
 over as bytes —`sys.call("image.data", "me", png)`, its own bytes (PNG, JPEG,
 GIF, WebP or SVG) or the same in base64, with or without a `data:…;base64,`
