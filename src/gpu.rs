@@ -3011,12 +3011,18 @@ impl DrawList {
                     if a <= 0.001 {
                         continue;
                     }
-                    let (slot, next) = tip.frame(image.0 as usize, texts, self.clock, self.reduced_motion);
+                    let d = [target.0.eval(c), target.1.eval(c), target.2.eval(c), target.3.eval(c)];
+                    // One read the size of its box (#161): that box in real pixels, with what a group
+                    // scales it by (the atlas's scale is applied where it is asked for).
+                    let grown = affine.m[0].hypot(affine.m[1]).max(affine.m[2].hypot(affine.m[3]));
+                    let (slot, next) = match tip.boxed_image(image.0 as usize, (d[2].abs() * grown, d[3].abs() * grown)) {
+                        Some(slot) => (slot, None),
+                        None => tip.frame(image.0 as usize, texts, self.clock, self.reduced_motion),
+                    };
                     let Some(slot) = slot else { continue };
                     if let Some(t) = next {
                         self.wake_at = Some(self.wake_at.map_or(t, |w| w.min(t)));
                     }
-                    let d = [target.0.eval(c), target.1.eval(c), target.2.eval(c), target.3.eval(c)];
                     let rgb = tint.as_ref().map(&color);
                     // One picture of a sheet: its piece of what the image takes in the atlas.
                     let mut uv = slot.uv();

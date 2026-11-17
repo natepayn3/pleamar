@@ -854,6 +854,9 @@ impl Typesetter {
                 self.last_picture
             }
         };
+        if crate::alloc_report::on() {
+            eprintln!("image  · a picture of its own, {}×{}: {:.1} MB on the card", px.0, px.1, px.0 as f64 * px.1 as f64 * 4.0 / 1e6);
+        }
         self.pending_pictures.push((page, px, rgba));
         AtlasSlot { x: 0, y: 0, width: px.0, height: px.1, page }
     }
@@ -904,6 +907,11 @@ impl Typesetter {
         let slots = images
             .iter()
             .map(|(source, size)| {
+                // Read later, the size of the box it is drawn in (`Texts::boxed_image`).
+                if *size == BOXED {
+                    animations.push(None);
+                    return None;
+                }
                 let path = match source {
                     ImageSource::File(r) | ImageSource::Pixels(r) => Some(r.clone()),
                     ImageSource::Icon(name) => crate::platform::icon(name),
@@ -1219,7 +1227,81 @@ pub struct Texts {
     /// How tall the atlas has to be on the card, and the most the card allows.
     height: u32,
     most: u32,
+    /// The scene's images made the size of the box they are drawn in (#161): by their number.
+    boxed: HashMap<usize, Boxed>,
 }
+
+/// An image declared `0, 0` that is only drawn with `fit: cover` or `fit: contain` (#161): it is not
+/// read whole when the scene loads, but the size of its box the first time it is drawn —never bigger
+/// than the file—, as a live image of that size. Its box may grow (another monitor, another scale, a
+/// `size:` that grows): read again for the bigger one, twice; a third time it is taken to be an image
+/// the scene enlarges on purpose (a zoom, a map) and read whole, as its own pixels.
+#[derive(Clone, Debug)]
+struct Boxed {
+    /// What it is read from, and whether it covers its box (else it is contained in it).
+    path: std::path::PathBuf,
+    cover: bool,
+    /// The file's own pixels, once looked at; `None` before, and for one that cannot be read (then whole).
+    own: Option<Option<(u32, u32)>>,
+    /// The size (logical, as a live image is asked for) it was last read at, and how many times its box grew.
+    size: Option<(u32, u32)>,
+    grew: u32,
+}
+
+/// The real pixels a picture of `own` pixels needs to fill a box of `want` real pixels: covering it (its
+/// shape kept, what overflows cut) or contained in it. Never more than its own (#161).
+pub fn boxed_px(own: (u32, u32), want: (f32, f32), cover: bool) -> (u32, u32) {
+    let (kx, ky) = (want.0 / own.0.max(1) as f32, want.1 / own.1.max(1) as f32);
+    let k = if cover { kx.max(ky) } else { kx.min(ky) }.min(1.0);
+    if !(k > 0.0) {
+        return (1, 1);
+    }
+    (((own.0 as f32 * k).ceil() as u32).clamp(1, own.0), ((own.1 as f32 * k).ceil() as u32).clamp(1, own.1))
+}
+
+/// The scene's images read the size of the box they are drawn in (#161), by number, and whether one of
+/// its drawings covers its box: declared `0, 0`, from a file of pixels (not pixel art, an icon or a live
+/// text), JPEG, or PNG or WebP that do not move, and drawn only with `fit: contain` or `fit: cover` and
+/// no `cell:`. One drawn with `fit: fill` (or none) somewhere keeps the file's own pixels, as before.
+pub fn boxed_images(scene: &crate::scene::Scene) -> Vec<(usize, bool)> {
+    use crate::scene::Instr;
+    // For each image: drawn at all, only into a box, and covering one.
+    let mut how: Vec<(bool, bool, bool)> = vec![(false, true, false); scene.images.len()];
+    for i in &scene.instrs {
+        if let Instr::Image { image, cell, fit, .. } = i {
+            if let Some(h) = how.get_mut(image.0 as usize) {
+                h.0 = true;
+                h.1 &= *fit > 0 && cell.is_none();
+                h.2 |= *fit == 2;
+            }
+        }
+    }
+    let still = |path: &std::path::Path| {
+        let ext = path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).unwrap_or_default();
+        let open = || std::fs::File::open(path).ok().map(std::io::BufReader::new);
+        match ext.as_str() {
+            "jpg" | "jpeg" => true,
+            "png" => open().and_then(|r| image::codecs::png::PngDecoder::new(r).ok()).and_then(|d| d.is_apng().ok()).is_some_and(|apng| !apng),
+            "webp" => open().and_then(|r| image::codecs::webp::WebPDecoder::new(r).ok()).is_some_and(|d| !d.has_animation()),
+            _ => false,
+        }
+    };
+    scene
+        .images
+        .iter()
+        .enumerate()
+        .filter_map(|(k, (source, size))| {
+            let (drawn, boxed, cover) = how[k];
+            match source {
+                ImageSource::File(path) if *size == (0, 0) && drawn && boxed && still(path) => Some((k, cover)),
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+/// What the workshop is asked for in place of an image drawn the size of its box: nothing, yet.
+const BOXED: (u32, u32) = (u32::MAX, u32::MAX);
 
 /// How many jobs the workshop has been given and how many it has finished:
 /// a film (`--film`) waits for it to be done before each frame, so a text laid
@@ -1267,7 +1349,7 @@ impl Texts {
     }
 
     fn new(to_workshop: Sender<Job>) -> Self {
-        Texts { to_workshop, layouts: HashMap::new(), requested: HashSet::new(), last: HashMap::new(), images: Vec::new(), animations: Vec::new(), sources: Vec::new(), live: HashMap::new(), live_requested: HashSet::new(), live_version: HashMap::new(), last_live: HashMap::new(), pending_upload: Vec::new(), pending_masks: Vec::new(), used: 1, mask_used: 1, pending_fit: Vec::new(), pending_pictures: Vec::new(), dropped_pictures: Vec::new(), pictures: HashSet::new(), unseen: HashMap::new(), generation: 0, scale: 1.0, working: WorkingSet::default(), recording: None, exhausted: false, rebuilding: false, too_large: None, height: ATLAS_SIZE, most: ATLAS_SIZE }
+        Texts { to_workshop, layouts: HashMap::new(), requested: HashSet::new(), last: HashMap::new(), images: Vec::new(), animations: Vec::new(), sources: Vec::new(), live: HashMap::new(), live_requested: HashSet::new(), live_version: HashMap::new(), last_live: HashMap::new(), pending_upload: Vec::new(), pending_masks: Vec::new(), used: 1, mask_used: 1, pending_fit: Vec::new(), pending_pictures: Vec::new(), dropped_pictures: Vec::new(), pictures: HashSet::new(), unseen: HashMap::new(), generation: 0, scale: 1.0, working: WorkingSet::default(), recording: None, exhausted: false, rebuilding: false, too_large: None, height: ATLAS_SIZE, most: ATLAS_SIZE, boxed: HashMap::new() }
     }
 
     pub fn scale(&self) -> f32 {
@@ -1312,6 +1394,19 @@ impl Texts {
     /// New scene or new scale: new atlas. What came before stops being valid, and
     /// with it whatever was being shown.
     pub fn reset(&mut self, scale: f32, images: &[(ImageSource, (u32, u32))], fonts: &[std::path::PathBuf]) {
+        self.reset_boxed(scale, images, fonts, &[]);
+    }
+
+    /// `reset`, with the images (by number, and whether they cover their box) that are read the size of
+    /// the box they are drawn in, not whole (#161: see `Boxed`).
+    pub fn reset_boxed(&mut self, scale: f32, images: &[(ImageSource, (u32, u32))], fonts: &[std::path::PathBuf], boxed: &[(usize, bool)]) {
+        self.boxed = boxed
+            .iter()
+            .filter_map(|&(k, cover)| match images.get(k) {
+                Some((ImageSource::File(path), (0, 0))) => Some((k, Boxed { path: path.clone(), cover, own: None, size: None, grew: 0 })),
+                _ => None,
+            })
+            .collect();
         self.generation += 1;
         self.scale = scale;
         self.layouts.clear();
@@ -1340,8 +1435,47 @@ impl Texts {
         }
         let _ = self.to_workshop_send(Job::Clear(scale));
         if !images.is_empty() {
-            let _ = self.to_workshop_send(Job::Images(images.to_vec(), self.generation));
+            let _ = self.to_workshop_send(Job::Images(self.to_load(), self.generation));
         }
+    }
+
+    /// The scene's images as the workshop loads them: those drawn the size of their box, not yet (see `Boxed`).
+    fn to_load(&self) -> Vec<(ImageSource, (u32, u32))> {
+        self.sources.iter().enumerate().map(|(k, (s, size))| (s.clone(), if self.boxed.contains_key(&k) { BOXED } else { *size })).collect()
+    }
+
+    /// Image `k` drawn in a box of `want` (logical: the atlas's scale is put on here), if it is one read the size of its box (#161);
+    /// `None` if it is not (then `frame`). The slot is that of the size asked for, or the one before
+    /// while it arrives.
+    pub fn boxed_image(&mut self, k: usize, want: (f32, f32)) -> Option<Option<AtlasSlot>> {
+        let scale = self.scale.max(0.01);
+        let b = self.boxed.get_mut(&k)?;
+        let own = *b.own.get_or_insert_with(|| image::image_dimensions(&b.path).ok().filter(|&(w, h)| w > 0 && h > 0));
+        let full = |own: (u32, u32)| (((own.0 as f32) / scale).floor().max(1.0) as u32, ((own.1 as f32) / scale).floor().max(1.0) as u32);
+        let size = match own {
+            // Unreadable: as before, whole (and the workshop says why).
+            None => (0, 0),
+            Some(own) if b.grew > 2 => full(own),
+            Some(own) => {
+                let px = boxed_px(own, (want.0 * scale, want.1 * scale), b.cover);
+                // As a live image is asked for: logical, the scale taken off; never past the file's own.
+                let need = (((px.0 as f32) / scale).ceil() as u32, ((px.1 as f32) / scale).ceil() as u32);
+                let (fw, fh) = full(own);
+                let need = (need.0.min(fw.max(1)), need.1.min(fh.max(1)));
+                match b.size {
+                    None => need,
+                    // Bigger by more than a hair: read again for it; a box that keeps growing is a zoom.
+                    Some(was) if need.0 as f32 > was.0 as f32 * 1.02 || need.1 as f32 > was.1 as f32 * 1.02 => {
+                        b.grew += 1;
+                        if b.grew > 2 { full(own) } else { (need.0.max(was.0), need.1.max(was.1)) }
+                    }
+                    Some(was) => was,
+                }
+            }
+        };
+        b.size = Some(size);
+        let name = b.path.to_string_lossy().into_owned();
+        Some(self.live_image(k, &name, size))
     }
 
     pub fn receive(&mut self, p: Parcel) {
@@ -1479,7 +1613,7 @@ impl Texts {
             self.generation += 1;
             self.rebuilding = true;
             self.exhausted = false;
-            let _ = self.to_workshop_send(Job::Rebuild(self.working.clone(), self.sources.clone(), self.generation));
+            let _ = self.to_workshop_send(Job::Rebuild(self.working.clone(), self.to_load(), self.generation));
         }
     }
 
@@ -2312,6 +2446,16 @@ mod tests {
     }
 
     #[test]
+    fn the_size_a_picture_is_read_at_for_its_box() {
+        // #161: covering a 1920 × 1080 box, an 8084 × 6264 photo is needed at 1920 × 1488 (the box's
+        // width rules), contained at 1394 × 1080; never more than its own pixels.
+        assert_eq!(boxed_px((8084, 6264), (1920.0, 1080.0), true), (1920, 1488));
+        assert_eq!(boxed_px((8084, 6264), (1920.0, 1080.0), false), (1394, 1080));
+        assert_eq!(boxed_px((800, 600), (3840.0, 2160.0), true), (800, 600), "never made bigger");
+        assert_eq!(boxed_px((800, 600), (0.0, 0.0), true), (1, 1));
+    }
+
+    #[test]
     fn decoding_with_fewer_copies_gives_the_same_pixels() {
         // #161: made smaller in its own kind of pixels (RGB) and premultiplied in place, a photo comes out
         // byte for byte as when it was turned into RGBA first; letterboxed or not, and one with alpha too.
@@ -2322,6 +2466,72 @@ mod tests {
             assert_eq!(fit_decoded(image::DynamicImage::ImageRgb8(rgb.clone()), px, false), before, "rgb at {px:?}");
             assert_eq!(fit_decoded(image::DynamicImage::ImageRgba8(rgba.clone()), px, false), fit(rgba.clone(), px, false), "rgba at {px:?}");
         }
+    }
+
+    #[test]
+    fn which_images_are_read_the_size_of_their_box() {
+        let dir = std::env::temp_dir().join(format!("pleamar-boxed-scene-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        image::RgbImage::new(64, 48).save(dir.join("photo.jpg")).unwrap();
+        image::RgbImage::new(64, 48).save(dir.join("still.png")).unwrap();
+        std::fs::write(dir.join("s.plm"), r#"scene Boxed {
+    surface { size: 400, 300 }
+    image covered = file "photo.jpg", 0, 0
+    image contained = file "still.png", 0, 0
+    image stretched = file "photo.jpg", 0, 0
+    image declared = file "photo.jpg", 64, 48
+    image both = file "photo.jpg", 0, 0
+    image art = pixels "still.png", 0, 0
+    image unused = file "photo.jpg", 0, 0
+    image covered { at: 0, 0; size: 400, 300; fit: cover }
+    image contained { at: 0, 0; size: 100, 100; fit: contain }
+    image stretched { at: 0, 0; size: 400, 300 }
+    image declared { at: 0, 0; size: 400, 300; fit: cover }
+    image both { at: 0, 0; size: 400, 300; fit: cover }
+    image both { at: 0, 0; size: 40, 30; fit: fill }
+    image art { at: 0, 0; size: 400, 300; fit: cover }
+}
+"#).unwrap();
+        let (scene, _) = crate::language::read_file(dir.join("s.plm").to_str().unwrap()).unwrap();
+        // Only the `0, 0` ones from a file, drawn only into a box: covering, or contained.
+        let boxed = boxed_images(&scene);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(boxed, [(0, true), (1, false)]);
+    }
+
+    #[test]
+    fn a_photo_drawn_to_cover_its_box_is_read_the_size_of_the_box() {
+        // #161: an image declared `0, 0` and drawn with `fit: cover` is not read whole when the scene loads
+        // but the size of its box when drawn; read again when the box grows; whole once it has grown three
+        // times (a scene that enlarges it on purpose).
+        let dir = std::env::temp_dir().join(format!("pleamar-boxed-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("photo.jpg");
+        image::RgbImage::from_fn(1600, 1200, |x, y| image::Rgb([(x % 256) as u8, (y % 256) as u8, 128])).save(&path).unwrap();
+        let (send, jobs) = channel();
+        let mut texts = Texts::new(send);
+        let mut t = Typesetter::new();
+        t.work(Job::Limit(8192));
+        texts.reset_boxed(1.0, &[(ImageSource::File(path.clone()), (0, 0))], &[], &[(0, true)]);
+        deliver(&mut t, &mut texts, &jobs);
+        assert!(texts.image(0, &[]).is_none() && texts.pending_pictures.is_empty(), "nothing read when the scene loads");
+        let mut frame = |texts: &mut Texts, want: (f32, f32)| {
+            texts.begin_frame();
+            texts.boxed_image(0, want).expect("a boxed image");
+            texts.end_frame();
+            deliver(&mut t, texts, &jobs);
+            texts.begin_frame();
+            let slot = texts.boxed_image(0, want).expect("a boxed image").expect("read");
+            texts.end_frame();
+            (slot.width, slot.height)
+        };
+        assert_eq!(frame(&mut texts, (400.0, 200.0)), (400, 300), "the size that covers the box, its shape kept");
+        assert_eq!(frame(&mut texts, (100.0, 100.0)), (400, 300), "a smaller box: not read again");
+        assert_eq!(frame(&mut texts, (800.0, 400.0)), (800, 600), "a bigger one: read again");
+        assert_eq!(frame(&mut texts, (1000.0, 400.0)), (1000, 750));
+        assert_eq!(frame(&mut texts, (1100.0, 400.0)), (1600, 1200), "growing again and again: whole");
+        assert_eq!(frame(&mut texts, (200.0, 100.0)), (1600, 1200));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
