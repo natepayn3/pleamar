@@ -1961,7 +1961,7 @@ fn data_image(name: &str) -> Option<Arc<Vec<u8>>> {
     DATA_IMAGES.lock().unwrap().as_ref()?.get(name).cloned()
 }
 
-fn looks_like_svg(data: &[u8]) -> bool {
+pub(crate) fn looks_like_svg(data: &[u8]) -> bool {
     let start = String::from_utf8_lossy(&data[..data.len().min(256)]).trim_start().to_ascii_lowercase();
     start.starts_with("<svg") || start.starts_with("<?xml")
 }
@@ -2001,6 +2001,37 @@ fn base64(text: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// The biggest SVG a drag's picture is made from (bytes), and how big its side is drawn: a theme's icon is
+/// 16 or 24 px and shows too small under the pointer, a big drawing is shrunk to the same.
+pub const DRAG_SVG_MAX_BYTES: usize = 1 << 20;
+pub const DRAG_SVG_SIDE: u32 = 64;
+
+/// A drag's picture from an SVG (`carry_icon:`), RGBA premultiplied: as big as `side` on its longer side,
+/// keeping its shape. Nothing outside it is read: an `<image>` that names a file or an address is left out
+/// (only pictures inside it, `data:`, are drawn), and a script is never run (usvg has no scripts). Too big a
+/// file, or one that is not an SVG, is none.
+pub fn svg_icon(data: &[u8], side: u32) -> Option<(Vec<u8>, u32, u32)> {
+    if data.len() > DRAG_SVG_MAX_BYTES || side == 0 || side > 512 {
+        return None;
+    }
+    let mut opts = resvg::usvg::Options::default();
+    opts.resources_dir = None;
+    opts.image_href_resolver = resvg::usvg::ImageHrefResolver {
+        resolve_data: resvg::usvg::ImageHrefResolver::default_data_resolver(),
+        resolve_string: Box::new(|_, _| None),
+    };
+    let tree = resvg::usvg::Tree::from_data(data, &opts).ok()?;
+    let t = tree.size();
+    if !(t.width() > 0.0 && t.height() > 0.0) {
+        return None;
+    }
+    let k = side as f32 / t.width().max(t.height());
+    let (w, h) = (((t.width() * k).round() as u32).clamp(1, side), ((t.height() * k).round() as u32).clamp(1, side));
+    let mut canvas = resvg::tiny_skia::Pixmap::new(w, h)?;
+    resvg::render(&tree, resvg::tiny_skia::Transform::from_scale(k, k), &mut canvas.as_mut());
+    Some((canvas.take(), w, h))
+}
+
 fn rasterize_image(path: &std::path::Path, px: (u32, u32), sharp: bool) -> Option<Vec<u8>> {
     let data = std::fs::read(path).ok()?;
     let is_svg = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("svg"));
@@ -2023,6 +2054,39 @@ fn rasterize_bytes(data: &[u8], is_svg: bool, px: (u32, u32), sharp: bool) -> Op
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A theme's 16 px icon comes out 64 px a side, its colour where it is drawn and clear round it; a picture
+    /// it points to on disk is not read; too big a file is none.
+    #[test]
+    fn a_drag_icon_from_an_svg_is_drawn_bigger_and_reads_nothing_outside_it() {
+        let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"><circle cx="8" cy="8" r="6" fill="#ff0000"/></svg>"##;
+        let (px, w, h) = svg_icon(svg, DRAG_SVG_SIDE).expect("an icon");
+        assert_eq!((w, h), (64, 64));
+        let at = |x: u32, y: u32| &px[((y * w + x) * 4) as usize..((y * w + x) * 4 + 4) as usize];
+        assert_eq!(at(32, 32), &[255, 0, 0, 255], "red in the middle");
+        assert_eq!(at(1, 1)[3], 0, "clear in the corner");
+        // Its shape kept: a wide one is 64 wide and less high.
+        let wide = br##"<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20"><rect width="40" height="20" fill="#00ff00"/></svg>"##;
+        assert_eq!(svg_icon(wide, 64).map(|i| (i.1, i.2)), Some((64, 32)));
+        // A picture named by its path: not read (it would be blue all over).
+        let dir = std::env::temp_dir().join(format!("pleamar-drag-svg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let blue = dir.join("blue.png");
+        image::RgbaImage::from_pixel(4, 4, image::Rgba([0, 0, 255, 255])).save(&blue).unwrap();
+        let outside = format!(r#"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="16" height="16"><image width="16" height="16" xlink:href="{}"/><image width="16" height="16" href="file://{}"/></svg>"#, blue.display(), blue.display());
+        let (px, w, _) = svg_icon(outside.as_bytes(), 64).expect("still an icon");
+        assert!(px.chunks_exact(4).all(|p| p[3] == 0), "nothing from the file outside it");
+        let _ = w;
+        let _ = std::fs::remove_dir_all(&dir);
+        // Too big, not an SVG, or a side out of bounds: none.
+        let mut big = b"<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10'>".to_vec();
+        big.resize(DRAG_SVG_MAX_BYTES + 10, b' ');
+        big.extend_from_slice(b"</svg>");
+        assert!(svg_icon(&big, 64).is_none());
+        assert!(svg_icon(b"not an svg", 64).is_none());
+        assert!(svg_icon(svg, 0).is_none());
+        assert!(svg_icon(svg, 4096).is_none());
+    }
 
     fn frame(width: u32, height: u32, bgra: [u8; 4], opaque: bool) -> crate::platform::ThumbnailFrame {
         crate::platform::ThumbnailFrame { version: 1, width, height, pixels: bgra.repeat((width * height) as usize), opaque, card: None }

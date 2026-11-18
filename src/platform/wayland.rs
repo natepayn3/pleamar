@@ -3060,8 +3060,17 @@ fn end_drag(source: &wayland_client::protocol::wl_data_source::WlDataSource) {
 /// A PNG as the surface of a drag: read, premultiplied (what Argb8888 means) and put in shared memory. Bigger than 512 px a side, or unreadable, it is none.
 fn drag_icon(d: &Drags, path: &str) -> Option<(wl_surface::WlSurface, WlBuffer, WlShmPool, std::os::fd::OwnedFd)> {
     let shm = d.shm.as_ref()?;
-    let img = image::open(path).ok()?.to_rgba8();
-    let (w, h) = img.dimensions();
+    // An SVG (a theme's icon) is drawn 64 px a side, reading nothing outside it; anything else, as `image` reads it.
+    let is_svg = std::path::Path::new(path).extension().is_some_and(|e| e.eq_ignore_ascii_case("svg"));
+    let (pixels, w, h, premultiplied) = if is_svg || std::fs::read(path).ok().is_some_and(|b| crate::text::looks_like_svg(&b)) {
+        let data = std::fs::read(path).ok()?;
+        let (px, w, h) = crate::text::svg_icon(&data, crate::text::DRAG_SVG_SIDE)?;
+        (px, w, h, true)
+    } else {
+        let img = image::open(path).ok()?.to_rgba8();
+        let (w, h) = img.dimensions();
+        (img.into_raw(), w, h, false)
+    };
     if w == 0 || h == 0 || w > 512 || h > 512 {
         return None;
     }
@@ -3074,10 +3083,10 @@ fn drag_icon(d: &Drags, path: &str) -> Option<(wl_surface::WlSurface, WlBuffer, 
             return None;
         }
         let out = std::slice::from_raw_parts_mut(map as *mut u8, len);
-        for (o, p) in out.chunks_exact_mut(4).zip(img.pixels()) {
-            let a = p.0[3] as u32;
-            let mul = |c: u8| ((c as u32 * a + 127) / 255) as u8;
-            o.copy_from_slice(&[mul(p.0[2]), mul(p.0[1]), mul(p.0[0]), p.0[3]]);
+        for (o, p) in out.chunks_exact_mut(4).zip(pixels.chunks_exact(4)) {
+            let a = p[3] as u32;
+            let mul = |c: u8| if premultiplied { c } else { ((c as u32 * a + 127) / 255) as u8 };
+            o.copy_from_slice(&[mul(p[2]), mul(p[1]), mul(p[0]), p[3]]);
         }
         libc::munmap(map, len);
     }

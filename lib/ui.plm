@@ -35,13 +35,15 @@ library Ui {
     //  Two or three choices in a pill, with the chosen one's background
     //  sliding to it. `value` is which one (0, 1, 2); `press` carries the one
     //  pressed: `on pick { mode = pick }`… or whatever the scene makes of it.
-    component Segmented(value: number, a: text, b: text, press: event, c: text = "", count: number = 2, width: number = 184) {
+    //  `accent:` is the chosen one's background and `track:` the pill's; given neither, white as it always was.
+    //  `accent_opacity:` how strong the chosen one is (16 %, as before; a colour of one's own wants more: 90 %).
+    component Segmented(value: number, a: text, b: text, press: event, c: text = "", count: number = 2, width: number = 184, accent: color = #ffffff, track: color = #ffffff, accent_opacity: number = 16%) {
         size: width, 30
         prop pos = 0 ~quick
         follow pos = value
         let seg = width / count
-        box { at: width / 2, 15; size: width, 30; corner: 15; color: #ffffff; opacity: 8% }
-        box { at: seg / 2 + pos * seg, 15; size: seg - 4, 24; corner: 12; color: #ffffff; opacity: 16% }
+        box { at: width / 2, 15; size: width, 30; corner: 15; color: track; opacity: 8% }
+        box { at: seg / 2 + pos * seg, 15; size: seg - 4, 24; corner: 12; color: accent; opacity: accent_opacity }
         repeat i in 0..3 {
             group {
                 show: i < count
