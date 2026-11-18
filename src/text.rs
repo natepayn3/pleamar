@@ -246,6 +246,16 @@ impl LayoutKey {
         self
     }
 
+    /// How many lines it may take at most (`lines:`), if it says.
+    pub fn max_lines(&self) -> Option<usize> {
+        self.max_lines
+    }
+
+    /// Its lines start at its left edge (not centred nor to the right).
+    pub fn left_aligned(&self) -> bool {
+        self.align == TextAlign::Left
+    }
+
     /// The same, with another most of lines (`None`: as many as it has).
     pub fn lined(mut self, lines: Option<usize>) -> LayoutKey {
         self.max_lines = lines;

@@ -12,8 +12,11 @@
 //! from what is behind them), `shadow_cut` and `drawing_cut` (the render's own
 //! warnings: a shadow or a shape that needs more room than its surface has).
 //! And `warnings`, nearly right but not quite: `misaligned` (texts whose left
-//! edges are 0.5–2.5 px apart) and `uneven_spacing` (a gap in a column of texts
-//! 1–3 px off the others').
+//! edges are 0.5–2.5 px apart; only texts put by their left edge, not centred
+//! ones), `uneven_spacing` (a gap in a column of texts 1–3 px off the others'),
+//! `tight_margin` (a text less than 8 px from an edge of its surface, unless
+//! that edge is the screen's) and `lines_overlap` (a text that may take more
+//! lines, as its `lines:` allows, and would then reach the text below it).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
@@ -22,14 +25,19 @@ static ON: AtomicBool = AtomicBool::new(false);
 
 struct Seen {
     texts: Vec<(String, [f32; 4])>,
+    /// For each text: whether it is put by its left edge, and the room its `lines:` give it.
+    left: Vec<bool>,
+    room: Vec<[f32; 4]>,
     surfaces: Vec<[f32; 4]>,
+    /// For each surface: it covers its monitor, so its edges are the screen's.
+    full: Vec<bool>,
     notes: Vec<(&'static str, String)>,
     /// The last frame filmed: RGBA, its size and where it sits on the plane.
     frame: Option<(Vec<u8>, u32, u32, f32, f32)>,
     dir: Option<std::path::PathBuf>,
 }
 
-static SEEN: Mutex<Seen> = Mutex::new(Seen { texts: Vec::new(), surfaces: Vec::new(), notes: Vec::new(), frame: None, dir: None });
+static SEEN: Mutex<Seen> = Mutex::new(Seen { texts: Vec::new(), left: Vec::new(), room: Vec::new(), surfaces: Vec::new(), full: Vec::new(), notes: Vec::new(), frame: None, dir: None });
 
 /// Asked for: where the film goes (a folder of its own, gone at the end).
 pub fn start() -> String {
@@ -45,13 +53,17 @@ pub fn on() -> bool {
 }
 
 /// Each round the render paints: the texts as painted (not those a list scrolled
-/// out of sight) and where its surfaces are.
-pub fn texts(seen: &[crate::gpu::SeenText], surfaces: Vec<[f32; 4]>) {
+/// out of sight) and where its surfaces are, each with whether it covers its monitor.
+pub fn texts(seen: &[crate::gpu::SeenText], surfaces: Vec<([f32; 4], bool)>) {
     let mut s = SEEN.lock().unwrap();
     // Where its letters are, not the box it was given: a word in a wide `width` is
     // that word, for what it covers, where it ends and how it stands out.
-    s.texts = seen.iter().filter(|t| !t.clipped && !t.text.trim().is_empty()).map(|t| (t.text.clone(), t.ink)).collect();
-    s.surfaces = surfaces;
+    let shown: Vec<&crate::gpu::SeenText> = seen.iter().filter(|t| !t.clipped && !t.text.trim().is_empty()).collect();
+    s.texts = shown.iter().map(|t| (t.text.clone(), t.ink)).collect();
+    s.left = shown.iter().map(|t| t.left).collect();
+    s.room = shown.iter().map(|t| t.room).collect();
+    s.surfaces = surfaces.iter().map(|x| x.0).collect();
+    s.full = surfaces.iter().map(|x| x.1).collect();
 }
 
 /// One of the render's own warnings (a shadow or a drawing its surface cuts).
@@ -150,13 +162,17 @@ pub fn problems(texts: &[(String, [f32; 4])], surfaces: &[[f32; 4]], contrasts: 
 /// are almost on the same line (0.5 to 2.5 px apart: meant to be aligned, and
 /// are not), and, in a column of three or more texts sharing a left edge, a
 /// gap between two of them 1 to 3 px off the others'.
-pub fn alignment(texts: &[(String, [f32; 4])]) -> Vec<serde_json::Value> {
+pub fn alignment(texts: &[(String, [f32; 4])], left: &[bool]) -> Vec<serde_json::Value> {
     use serde_json::json;
     let mut out = Vec::new();
     let short = |t: &str| -> String { t.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(30).collect() };
     let mut told: Vec<(usize, usize)> = Vec::new();
     for i in 0..texts.len() {
         for j in i + 1..texts.len() {
+            // A centred text starts where its words make it start: its left edge says nothing.
+            if !left.get(i).copied().unwrap_or(true) || !left.get(j).copied().unwrap_or(true) {
+                continue;
+            }
             let d = (texts[i].1[0] - texts[j].1[0]).abs();
             if d > 0.5 && d <= 2.5 && !told.iter().any(|&(a, b)| a == i || b == j || a == j || b == i) {
                 told.push((i, j));
@@ -170,7 +186,7 @@ pub fn alignment(texts: &[(String, [f32; 4])]) -> Vec<serde_json::Value> {
         if done[i] {
             continue;
         }
-        let mut col: Vec<usize> = (0..texts.len()).filter(|&j| (texts[j].1[0] - texts[i].1[0]).abs() <= 0.5).collect();
+        let mut col: Vec<usize> = (0..texts.len()).filter(|&j| left.get(j).copied().unwrap_or(true) && (texts[j].1[0] - texts[i].1[0]).abs() <= 0.5).collect();
         for &j in &col {
             done[j] = true;
         }
@@ -195,6 +211,54 @@ pub fn alignment(texts: &[(String, [f32; 4])]) -> Vec<serde_json::Value> {
     out
 }
 
+/// The room round texts, as warnings: a text closer than 8 px to an edge of its
+/// surface (not past it: that is `text_outside`), except an edge that is the
+/// screen's (a menu bar's words sit near the top of the monitor, and should).
+pub fn margins(texts: &[(String, [f32; 4])], surfaces: &[[f32; 4]], full: &[bool]) -> Vec<serde_json::Value> {
+    use serde_json::json;
+    const ROOM: f32 = 8.0;
+    let short = |t: &str| -> String { t.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(30).collect() };
+    let mut out = Vec::new();
+    for (t, b) in texts {
+        let centre = ((b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0);
+        let Some(k) = surfaces.iter().position(|s| centre.0 >= s[0] && centre.0 <= s[2] && centre.1 >= s[1] && centre.1 <= s[3]) else { continue };
+        if full.get(k).copied().unwrap_or(false) {
+            continue;
+        }
+        let s = surfaces[k];
+        let gaps = [b[0] - s[0], b[1] - s[1], s[2] - b[2], s[3] - b[3]];
+        if gaps.iter().any(|g| *g < -1.0) {
+            continue; // past the edge: text_outside says it
+        }
+        let sides = ["left", "top", "right", "bottom"];
+        let near: Vec<String> = (0..4).filter(|&i| gaps[i] < ROOM).map(|i| format!("{:.0} px from the {}", gaps[i].max(0.0), sides[i])).collect();
+        if !near.is_empty() {
+            out.push(json!({ "code": "tight_margin", "level": "warning", "message": format!("«{}» is {} of its surface: leave {ROOM:.0} px at least", short(t), near.join(" and ")), "bounds": b }));
+        }
+    }
+    out
+}
+
+/// A text on fewer lines than its `lines:` allow, with another under it inside
+/// the room the rest would take: as soon as its words grow, they are drawn over
+/// it. A warning, since today they are not.
+pub fn growth(texts: &[(String, [f32; 4])], room: &[[f32; 4]]) -> Vec<serde_json::Value> {
+    use serde_json::json;
+    let short = |t: &str| -> String { t.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(30).collect() };
+    let mut out = Vec::new();
+    for (i, (t, b)) in texts.iter().enumerate() {
+        let Some(r) = room.get(i).copied().filter(|r| r[3] > b[3] + 0.5) else { continue };
+        for (j, (u, c)) in texts.iter().enumerate() {
+            // Below it (starting under its first line), side by side with its room, and inside it.
+            let across = r[2].min(c[2]) - r[0].max(c[0]);
+            if j != i && c[1] > b[1] + 1.0 && across > 2.0 && c[1] < r[3] - 2.0 {
+                out.push(json!({ "code": "lines_overlap", "level": "warning", "message": format!("«{}» may grow {:.0} px more (its `lines:` allow it) and would then be drawn over «{}»", short(t), r[3] - b[3], short(u)), "bounds": meet(r, *c) }));
+            }
+        }
+    }
+    out
+}
+
 /// At the end: the report, as the last line on stdout, and the film gone.
 pub fn finish() {
     use serde_json::json;
@@ -207,6 +271,7 @@ pub fn finish() {
     for (code, m) in &s.notes {
         problems.push(json!({ "code": code, "message": m.trim_start_matches("render · ") }));
     }
+    let warnings = [alignment(&s.texts, &s.left), margins(&s.texts, &s.surfaces, &s.full), growth(&s.texts, &s.room)].concat();
     let report = json!({
         "type": "layout",
         "ok": problems.is_empty(),
@@ -214,7 +279,7 @@ pub fn finish() {
         "surfaces": s.surfaces,
         "texts": s.texts.iter().zip(&contrasts).map(|((t, b), c)| json!({ "text": t, "bounds": b, "contrast": c.map(|c| (c as f64 * 10.0).round() / 10.0) })).collect::<Vec<_>>(),
         "problems": problems,
-        "warnings": alignment(&s.texts),
+        "warnings": warnings,
     });
     if let Some(d) = &s.dir {
         let _ = std::fs::remove_dir_all(d);
@@ -255,13 +320,47 @@ mod tests {
             t("Three", [16.0, 84.0, 60.0, 100.0]),
             t("Off", [17.5, 120.0, 60.0, 136.0]),
         ];
-        let w = alignment(&texts);
+        let w = alignment(&texts, &[true; 5]);
         let codes: Vec<&str> = w.iter().map(|x| x["code"].as_str().unwrap()).collect();
         assert_eq!(codes, ["misaligned", "uneven_spacing"], "{w:?}");
         assert!(w[1]["message"].as_str().unwrap().contains("Three"));
         // Exactly aligned and evenly spaced: nothing.
         let fine = [t("A", [16.0, 10.0, 40.0, 26.0]), t("B", [16.0, 34.0, 40.0, 50.0]), t("C", [16.0, 58.0, 40.0, 74.0]), t("Far", [120.0, 10.0, 160.0, 26.0])];
-        assert!(alignment(&fine).is_empty());
+        assert!(alignment(&fine, &[true; 4]).is_empty());
+        // Centred texts start where their words make them: 1.5 px apart is not a fault.
+        let centred = [t("Small", [40.0, 10.0, 80.0, 26.0]), t("Medium", [41.5, 40.0, 79.0, 56.0])];
+        assert!(alignment(&centred, &[false, false]).is_empty());
+        assert_eq!(alignment(&centred, &[true, true]).len(), 1);
+    }
+
+    #[test]
+    fn a_text_against_its_edge_is_warned_unless_the_edge_is_the_screens() {
+        let t = |s: &str, b: [f32; 4]| (s.to_owned(), b);
+        // A widget: «RED» at 0, 1; «Fine» 16 px in.
+        let texts = [t("RED", [0.0, 1.0, 22.0, 15.0]), t("Fine", [16.0, 40.0, 60.0, 56.0])];
+        let w = margins(&texts, &[[0.0, 0.0, 344.0, 164.0]], &[false]);
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert_eq!(w[0]["code"], "tight_margin");
+        assert!(w[0]["message"].as_str().unwrap().contains("0 px from the left and 1 px from the top"), "{w:?}");
+        // A menu bar on a surface that covers the monitor: its words near the top are meant.
+        assert!(margins(&[t("Window", [346.0, 7.0, 397.0, 24.0])], &[[0.0, 0.0, 1280.0, 720.0]], &[true]).is_empty());
+        // Past the edge is text_outside's, not this.
+        assert!(margins(&[t("Wide", [300.0, 10.0, 360.0, 30.0])], &[[0.0, 0.0, 344.0, 164.0]], &[false]).is_empty());
+    }
+
+    #[test]
+    fn a_text_that_may_grow_over_the_one_below_is_warned() {
+        let t = |s: &str, b: [f32; 4]| (s.to_owned(), b);
+        // Two lines of 17 px of three allowed (room to 90.7), and a label at 72: e08.
+        let texts = [t("Long", [16.0, 40.0, 327.0, 73.8]), t("Below", [16.0, 72.0, 168.0, 88.9])];
+        let room = [[16.0, 40.0, 328.0, 90.7], texts[1].1];
+        let w = growth(&texts, &room);
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert_eq!(w[0]["code"], "lines_overlap");
+        // With all its lines (its room is itself) or the other well below: nothing.
+        assert!(growth(&texts, &[texts[0].1, texts[1].1]).is_empty());
+        let far = [texts[0].clone(), t("Below", [16.0, 100.0, 168.0, 116.0])];
+        assert!(growth(&far, &room).is_empty());
     }
 
     #[test]

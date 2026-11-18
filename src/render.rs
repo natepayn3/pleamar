@@ -4926,9 +4926,11 @@ pub fn run(
                 reader_dirty = true;
             }
             compose_seen.reset(facts.len(), props.len());
+            let covers = |v: &crate::gpu::View| covers_its_monitor(&scene, v);
+            draw.screen_edges = sheets.iter().any(|s| s.open) && sheets.iter().filter(|s| s.open).all(|s| covers(&s.view));
             draw.compose(to_paint, Ctx { seen: Some(&compose_seen), ..c }, &texts, &mut letters, view.clone(), size, op.hud);
             if crate::layout::on() {
-                crate::layout::texts(&draw.texts_seen, sheets.iter().filter(|s| s.open).map(|s| s.view.bounds()).collect());
+                crate::layout::texts(&draw.texts_seen, sheets.iter().filter(|s| s.open).map(|s| (s.view.bounds(), covers(&s.view))).collect());
             }
             stretches_copied += draw.copied.0 as u64;
             stretches_made += draw.copied.1 as u64;
@@ -8082,6 +8084,29 @@ fn seen_at(ready: Instant, shown: Option<(Instant, Duration)>) -> Option<Instant
     }
     let n = since.as_nanos() / refresh.as_nanos() + 1;
     Some(at + refresh * n as u32)
+}
+
+/// A surface that covers its monitor (`size: full, full`): its edges are the
+/// screen's. A popup never does, and neither does one with a size of its own.
+fn covers_its_monitor(scene: &crate::scene::Scene, v: &crate::gpu::View) -> bool {
+    v.popup.is_none() && scene.surfaces.get(v.surface).is_some_and(|f| f.width == 0 && f.height == 0)
+}
+
+#[cfg(test)]
+mod monitor_tests {
+    use super::*;
+
+    #[test]
+    fn only_a_full_surface_has_the_screens_edges() {
+        let view = |surface, popup| crate::gpu::View { surface, popup, origin: (0.0, 0.0), size: (100.0, 100.0) };
+        let (full, _) = crate::language::read_file(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/chained-lets-per-screen.plm")).unwrap();
+        assert!(covers_its_monitor(&full, &view(0, None)));
+        // Its popup does not, though its surface does.
+        assert!(!covers_its_monitor(&full, &view(0, Some(0))));
+        // A card of its own size (a widget, a desk of 100 × 100): its edges are its own.
+        let (card, _) = crate::language::read_file(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/anchor-by-fact.plm")).unwrap();
+        assert!(!covers_its_monitor(&card, &view(0, None)));
+    }
 }
 
 #[cfg(test)]

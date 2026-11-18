@@ -130,6 +130,9 @@ pub struct DrawList {
     clipping: Pending,
     /// The size of the scene's surface, without the instruments strip.
     own_size: (f32, f32),
+    /// Every surface painted covers its monitor (`size: full, full`): its edges
+    /// are the screen's, and nothing is ever seen past them (`check_shadow`).
+    pub screen_edges: bool,
     /// Stretches of instructions that are not looked at this frame: those of a
     /// per-screen copy whose surface is closed.
     pub skip: Vec<std::ops::Range<usize>>,
@@ -504,6 +507,12 @@ pub struct SeenText {
     pub ink: [f32; 4],
     /// Cut out by a clip: a row scrolled out of its list. Only that row's.
     pub clipped: bool,
+    /// Its left edge is where it was put: anchored and aligned to the left. A
+    /// centred or right-aligned text starts wherever its words make it start.
+    pub left: bool,
+    /// Where it may reach with all the lines its `lines:` allows: its `ink` while
+    /// it has them all (or says no `lines:`), taller while its words are fewer.
+    pub room: [f32; 4],
 }
 
 #[derive(Clone)]
@@ -1868,7 +1877,7 @@ impl DrawList {
                 }
             }
             if self.collect_texts && !seen_text.trim().is_empty() {
-                self.texts_seen.push(SeenText { at: idx, text: seen_text.trim_end().to_owned(), bounds: limit, ink: limit, clipped: false });
+                self.texts_seen.push(SeenText { at: idx, text: seen_text.trim_end().to_owned(), bounds: limit, ink: limit, clipped: false, left: true, room: limit });
             }
         }
         clips.pop();
@@ -1957,7 +1966,10 @@ impl DrawList {
     /// comes from two numbers. The computation is already done up there;
     /// reporting it costs four subtractions.
     fn check_shadow(&mut self, shape: [f32; 4], (dx, dy, d): (f32, f32, f32)) {
-        if self.shadow.told {
+        // Past the screen's edge there is nothing to see it cut: a Dock that floats
+        // a few pixels over the bottom of a surface that covers the monitor has its
+        // shadow end where the screen ends, as any shadow there would.
+        if self.shadow.told || self.screen_edges {
             return;
         }
         let (w, height) = self.own_size;
@@ -3421,6 +3433,7 @@ impl DrawList {
                         None => key,
                     };
                     let text: &str = &text;
+                    let (most_lines, left_aligned) = (key.max_lines(), key.left_aligned());
                     // It is ordered even if not visible: so that when it appears, it is already there.
                     let Some(m) = tip.layout(idx, key) else { continue };
                     if let Some((w, h)) = measure {
@@ -3464,7 +3477,17 @@ impl DrawList {
                                 }
                             }
                             let ink = if r > l && d > t { affine.bounds([x0 + l, y0 + t, x0 + r, y0 + d]) } else { b };
-                            self.texts_seen.push(SeenText { at: idx, text: text.to_owned(), bounds: b, ink, clipped: !seen });
+                            // With fewer lines than its `lines:` allows, the room the rest would take,
+                            // each as tall as those it has and as wide as its box.
+                            let room = match most_lines {
+                                Some(n) if r > l && d > t && m.lines.len() < n => {
+                                    let each = (d - t) / m.lines.len() as f32;
+                                    affine.bounds([x0 + l, y0 + t, x0 + m.size.0.max(r), y0 + t + each * n as f32])
+                                }
+                                _ => ink,
+                            };
+                            let left = anchor.0 == 0.0 && left_aligned;
+                            self.texts_seen.push(SeenText { at: idx, text: text.to_owned(), bounds: b, ink, clipped: !seen, left, room });
                         }
                     }
                     // Its pictures (`images:`), each in the room its lines make, as wide as the text
@@ -6818,6 +6841,32 @@ mod sole_window_tests {
         let elsewhere = element(0.0, [2000.0, 0.0, 100.0, 100.0], 1.0);
         assert_eq!(ask(&[w, elsewhere], &[], PX), Ok(42));
         assert_eq!(sole_window(&[], &[], &[], V, PX), Err("nothing is drawn on it"));
+    }
+}
+
+#[cfg(test)]
+mod shadow_edge_tests {
+    use super::*;
+
+    #[test]
+    fn a_shadow_past_the_screens_edge_is_not_cut_one_past_its_own_surface_is() {
+        // A Dock 5 px over the bottom of a 1280 × 720 surface, its shadow 4 down and 18 soft: 17 px past.
+        let dock = [440.0, 650.0, 840.0, 715.0];
+        let mut d = DrawList::default();
+        d.own_size = (1280.0, 720.0);
+        d.screen_edges = true;
+        d.check_shadow(dock, (0.0, 4.0, 18.0));
+        assert!(d.shadow.message.is_none(), "the screen's edge cuts nothing anyone sees");
+        // The same on a surface with a size of its own: said.
+        let mut d = DrawList::default();
+        d.own_size = (1280.0, 720.0);
+        d.check_shadow(dock, (0.0, 4.0, 18.0));
+        assert!(d.shadow.message.as_deref().is_some_and(|m| m.contains("17 px below")), "{:?}", d.shadow.message);
+        // A small card whose shadow leaves its own 344 × 164 surface: said.
+        let mut d = DrawList::default();
+        d.own_size = (344.0, 164.0);
+        d.check_shadow([16.0, 16.0, 328.0, 150.0], (0.0, 20.0, 50.0));
+        assert!(d.shadow.message.is_some());
     }
 }
 
