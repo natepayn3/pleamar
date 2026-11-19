@@ -876,6 +876,37 @@ scene Headed {
     }
 
     #[test]
+    fn a_windows_rule_values_are_any_names_the_scene_reads_and_it_knows_if_it_is_see_through() {
+        let dir = std::env::temp_dir().join(format!("pleamar-rules-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("rules.plm");
+        std::fs::write(&path, "scene Rules {
+    surface { size: 200, 100 }
+    windows win max 2
+    fact at = 1
+    repeat i in 0..2 {
+        box { from: 0, 0; size: 10, 10; color: #fff; opacity: if(win.$i.translucent, win.$i.rule.opacity, 1) }
+    }
+    box { from: 0, 20; size: 10, 10; color: #fff; show: win[at].rule.no_shadow < 1 }
+    text \"{win.0.rule.label}\" { at: 0, 40; size: 12; color: #fff }
+}
+").unwrap();
+        let scene = super::read(path.to_str().unwrap());
+        let _ = std::fs::remove_dir_all(&dir);
+        let scene = scene.unwrap_or_else(|e| panic!("{e}"));
+        let names: Vec<&str> = scene.facts.iter().map(|f| f.0).collect();
+        for k in 0..2 {
+            for f in ["translucent", "rule.opacity", "rule.no_shadow", "rule.label"] {
+                let n = format!("win.{k}.{f}");
+                let at = names.iter().position(|x| *x == n).unwrap_or_else(|| panic!("no {n}"));
+                assert_eq!(scene.facts[at].1, 0.0, "{n} starts at 0");
+            }
+        }
+        // Only the names it reads: no vocabulary of the compositor's.
+        assert!(!names.iter().any(|n| n.contains(".rule.") && !n.ends_with("opacity") && !n.ends_with("no_shadow") && !n.ends_with("label")));
+    }
+
+    #[test]
     fn a_fold_inside_a_turn_is_that_turns_own() {
         let set = set_by_rules("scene Local {
     surface { size: 200, 40 }

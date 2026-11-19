@@ -1212,6 +1212,47 @@ fn mentions(entries: &[Entry], word: &str) -> bool {
     })
 }
 
+/// The NAMEs read as `….rule.NAME` anywhere in the scene (a window's values
+/// from the compositor's rules): the scene's own words, not known before.
+fn rule_mentions(entries: &[Entry], out: &mut std::collections::BTreeSet<String>) {
+    let scan = |t: &[crate::language::tokens::Token], out: &mut std::collections::BTreeSet<String>| {
+        for t in t {
+            match &t.kind {
+                TokenKind::Id(w) => {
+                    let parts: Vec<&str> = w.split('.').collect();
+                    for k in 1..parts.len().saturating_sub(1) {
+                        let r = parts[k + 1];
+                        if parts[k] == "rule" && r.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_') && r.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                            out.insert(r.to_owned());
+                        }
+                    }
+                }
+                // Inside a text's `{…}`: `"{win.0.rule.opacity}"`.
+                TokenKind::Str(s) => {
+                    for (at, _) in s.match_indices(".rule.") {
+                        let r: String = s[at + 6..].chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
+                        if r.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_') {
+                            out.insert(r);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    };
+    for e in entries {
+        match e {
+            Entry::Prop { value, .. } => scan(value, out),
+            Entry::Node(n) => {
+                scan(&n.head, out);
+                if let Some(b) = &n.body {
+                    rule_mentions(b, out);
+                }
+            }
+        }
+    }
+}
+
 /// `component Row(time: text, …)`: whether that component has a parameter of that name.
 fn has_parameter(n: &Node, word: &str) -> bool {
     matches!(n.head.first().map(|t| &t.kind), Some(TokenKind::Id(k)) if k == "component")
@@ -8736,6 +8777,9 @@ impl<'a> Compiler<'a> {
             }
             o.facts.insert(full, id);
         };
+        // `win.$i.rule.NAME`, `win[i].rule.NAME`: every NAME the scene reads, wherever.
+        let mut rules = std::collections::BTreeSet::new();
+        rule_mentions(self.top, &mut rules);
         for k in 0..max + desk {
             if k >= max {
                 // A desk slot: where its widget is, and on which monitor.
@@ -8758,6 +8802,14 @@ impl<'a> Compiler<'a> {
             fact(self, format!("{name}.{k}.framed"), 0.0, true);
             // It asks for attention, until it gets the keyboard.
             fact(self, format!("{name}.{k}.urgent"), 0.0, true);
+            // It may be seen through (the compositor knows: no opaque region
+            // over all of it, or it asked for a blurred background).
+            fact(self, format!("{name}.{k}.translucent"), 0.0, true);
+            // What the compositor's window rules set (`set NAME VALUE`): the
+            // names are the scene's own, 0 while no rule sets them.
+            for r in &rules {
+                fact(self, format!("{name}.{k}.rule.{r}"), 0.0, false);
+            }
             fact(self, format!("{name}.{k}.held"), 0.0, false);
             fact(self, format!("{name}.{k}.edges"), 0.0, false);
             // Workspaces: which one it is on (they start at 1), how many share

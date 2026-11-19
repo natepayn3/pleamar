@@ -3145,6 +3145,16 @@ pub enum NestEvent {
     /// A window lets the compositor draw its frame (server-side decorations),
     /// or draws its own title bar and buttons (client-side, as GTK 4 does).
     Framed(usize, bool),
+    /// A window may be seen through: its program says no opaque region that
+    /// covers all of it, or it asked for the background behind it to be
+    /// blurred (`ext-background-effect`). `win.$i.translucent`; the scene
+    /// decides what to put behind it.
+    Translucent(usize, bool),
+    /// The values the compositor's window rules set for a window, all of them
+    /// (`window app=X set NAME VALUE`): `win.$i.rule.NAME`. A name the scene
+    /// reads and the list does not have is 0, so one message also clears what
+    /// a window that came before in its slot had. The words are the scene's.
+    Rules(usize, Vec<(String, f32)>),
     /// A window asks, from its own title bar or edge, to be carried with the
     /// mouse (1) or stretched (2) by `edges` (xdg-shell's: 1 top, 2 bottom,
     /// 4 left, 8 right, added); 0 when the button is let go.

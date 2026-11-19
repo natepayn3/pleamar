@@ -394,6 +394,18 @@ fn nest_fact(scene: &Scene, facts: &mut [f32], to_logic: &Sender<Event>, name: &
     }
 }
 
+/// Every `win.N.rule.NAME` the scene reads: the value the rules gave it, or 0.
+fn nest_rules(scene: &Scene, facts: &mut [f32], to_logic: &Sender<Event>, prefix: &str, values: &[(String, f32)]) {
+    for (k, h) in scene.facts.iter().enumerate() {
+        let Some(rule) = h.0.strip_prefix(prefix) else { continue };
+        let v = values.iter().rev().find(|(n, _)| n == rule).map_or(0.0, |(_, v)| *v);
+        if (facts[k] - v).abs() > f32::EPSILON {
+            facts[k] = v;
+            let _ = to_logic.send(Event::Fact(h.0, v));
+        }
+    }
+}
+
 fn nest_text(scene: &Scene, texts: &mut [String], to_logic: &Sender<Event>, name: &str, v: String) {
     if let Some(k) = scene.texts.iter().position(|t| t.0 == name) {
         if k < texts.len() && texts[k] != v {
@@ -1740,6 +1752,10 @@ pub fn run(
                             }
                             nest_screens[slot] = screen;
                             nest_fact(&scene, &mut facts, &to_logic, &format!("{name}.{slot}.screen"), screen as f32);
+                            // What the window before it in this slot looked like is not its own:
+                            // the compositor says this one's next.
+                            nest_fact(&scene, &mut facts, &to_logic, &format!("{name}.{slot}.translucent"), 0.0);
+                            nest_rules(&scene, &mut facts, &to_logic, &format!("{name}.{slot}.rule."), &[]);
                             // It opens on the pool its monitor shows.
                             desks.grow(n.max);
                             desks.pool[slot] = desks.shown[screen.min(3)];
@@ -1807,6 +1823,8 @@ pub fn run(
                         NestEvent::Fullscreen(slot, yes) => nest_fact(&scene, &mut facts, &to_logic, &format!("{name}.{slot}.fullscreen"), yes as u8 as f32),
                         NestEvent::Framed(slot, yes) => nest_fact(&scene, &mut facts, &to_logic, &format!("{name}.{slot}.framed"), yes as u8 as f32),
                         NestEvent::Urgent(slot, yes) => nest_fact(&scene, &mut facts, &to_logic, &format!("{name}.{slot}.urgent"), yes as u8 as f32),
+                        NestEvent::Translucent(slot, yes) => nest_fact(&scene, &mut facts, &to_logic, &format!("{name}.{slot}.translucent"), yes as u8 as f32),
+                        NestEvent::Rules(slot, values) => nest_rules(&scene, &mut facts, &to_logic, &format!("{name}.{slot}.rule."), &values),
                         NestEvent::Held { slot, how, edges } => {
                             nest_fact(&scene, &mut facts, &to_logic, &format!("{name}.{slot}.edges"), edges as f32);
                             nest_fact(&scene, &mut facts, &to_logic, &format!("{name}.{slot}.held"), how as f32);
