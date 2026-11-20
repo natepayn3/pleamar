@@ -673,6 +673,9 @@ struct CaptureBuffer {
 impl Drop for CaptureBuffer {
     fn drop(&mut self) {
         self.buffer.destroy();
+        // The pool too: a proxy dropped is not destroyed, and the compositor kept every pool's memory (and its
+        // file) for as long as we were connected: one more with each change of a glass's size, until it ran out of files.
+        self._pool.destroy();
     }
 }
 
@@ -2763,6 +2766,11 @@ impl smithay_client_toolkit::session_lock::SessionLockHandler for State {
             let len = size.0 as usize * size.1 as usize * 4;
             if cover.as_ref().is_none_or(|(_, _, _, was)| *was != size) && len > 0 {
                 let Some(fd) = memfd(len) else { return };
+                // The old one's pool and buffer are let go (a proxy dropped is not destroyed: the compositor would keep them).
+                if let Some((p, b, _, _)) = cover.take() {
+                    b.destroy();
+                    p.destroy();
+                }
                 let pool = shm.create_pool(std::os::fd::AsFd::as_fd(&fd), len as i32, &self.qh, Silent);
                 let buffer = pool.create_buffer(0, size.0 as i32, size.1 as i32, size.0 as i32 * 4, wl_shm::Format::Xrgb8888, &self.qh, Silent);
                 *cover = Some((pool, buffer, fd, size));
