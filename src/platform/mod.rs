@@ -564,7 +564,17 @@ pub fn listen_for_commands(scene: &str, receive: Commands) {
     std::thread::Builder::new()
         .name("commands".into())
         .spawn(move || {
-            for mut c in listener.incoming().map_while(Result::ok) {
+            for c in listener.incoming() {
+                // A refused one (no file left to give it: EMFILE, the process at its limit) is skipped,
+                // not the end of listening: with `map_while` the first one stopped this thread for good,
+                // and the scene never answered `--say` again until it was started anew.
+                let mut c = match c {
+                    Ok(c) => c,
+                    Err(_) => {
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                        continue;
+                    }
+                };
                 let Ok(reader) = c.try_clone() else { continue };
                 // Each one on its own: a `wait` or a `watch` that lasts does not
                 // keep the next order waiting (an agent presses while it watches).
