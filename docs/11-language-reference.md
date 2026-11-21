@@ -494,7 +494,7 @@ scene Shell { }
 | `screen.index` | the same, as a number |
 | `screen.name` | the name of **its** monitor, set by the renderer (`HDMI-A-1`) |
 | `screen.width` · `screen.height` | what **its** monitor measures |
-| `screens.count` | how many monitors are showing something |
+| `screens.count` | how many monitors are showing something (so a model cannot be called `screens`: its own `.count` would be this one, and `--check` says so) |
 
 **The keyboard is the copy's whose monitor has it**: its `on key`, `on keyup`, `on focus` and `on blur` rules fire, and its `input` is typed into; the other copies' do not (a rule outside the copies hears the keys as ever). The copy is the one the compositor gives the keyboard to, or the one last pressed. It goes by monitor: with the keyboard on a copy, every copy on that monitor hears the keys —the scene's own, a named surface's, a scene brought in's— and those on the other monitors do not. A `keyboard: exclusive while …` is read in each copy, so `while open_screen == screen.index` asks for it only on that monitor.
 

@@ -9081,6 +9081,11 @@ impl<'a> Compiler<'a> {
 
     fn model(&mut self, n: &'a Node, c: &mut Cur) -> R<()> {
         let name = self.declare(&c.id("a name for the model")?);
+        // `screens.count` is how many monitors show something, set by the render by that name: a model
+        // called `screens` has the same name for its own count, and its rows were cut to the monitors (#167).
+        if name == "screens" {
+            return Err(CompileError::at(n.line, n.col, "`screens` is the monitors' own name (`screens.count` is how many show something), so a model cannot be called that: its rows would be cut to the number of monitors. Call it `rows` or `cards`"));
+        }
         let capacity = if c.word("max") { c.num()? as usize } else { 16 };
         c.expect_end()?;
         let fields = self.fields_of(n, capacity)?;

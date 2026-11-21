@@ -1,0 +1,8 @@
+// expect: error «`screens` is the monitors' own name»
+scene Bad {
+    surface { size: 420, 160; anchor: center }
+    model screens max 4 { label: text; x: number }
+    for r in screens {
+        text r.label { at: 110 + r.x, 95; anchor: center; size: 14; color: #ffffff }
+    }
+}
