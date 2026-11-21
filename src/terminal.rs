@@ -805,7 +805,7 @@ fn open_link(link: &str) {
         return;
     }
     #[cfg(target_os = "linux")]
-    let opened = std::process::Command::new("setsid").args(["-f", "xdg-open", link]).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status();
+    let opened = crate::platform::spawn_detached("xdg-open", "Link", &["xdg-open", link]);
     #[cfg(target_os = "macos")]
     let opened = std::process::Command::new("open").arg(link).status();
     #[cfg(target_os = "windows")]

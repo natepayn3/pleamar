@@ -1796,6 +1796,8 @@ mod appearance;
 #[cfg(target_os = "linux")]
 mod desktop;
 #[cfg(target_os = "linux")]
+pub(crate) use desktop::spawn_detached;
+#[cfg(target_os = "linux")]
 mod hyprland;
 #[cfg(target_os = "linux")]
 mod mpris;

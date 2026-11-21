@@ -192,32 +192,112 @@ impl App {
 /// otherwise, `apps.launch` would be a way to run anything with the
 /// permission to "see the apps".
 pub fn launch(command: &str) -> Result<(), String> {
-    use std::process::{Command, Stdio};
     let apps: Vec<App> = installed().into_iter().filter(|a| a.exec == command || a.actions.iter().any(|x| x.exec == command)).collect();
     if apps.is_empty() {
         return Err(format!("'{command}' is none of the installed applications: apps.launch only launches what the `apps` service has reported"));
     }
-    let mut launch = Command::new("setsid");
-    crate::child_env(&mut launch);
-    launch.arg("-f");
+    let mut argv = Vec::new();
     // On its own it would have nothing to talk to (its stdin is /dev/null):
     // the user's terminal runs it, the one xdg-terminal-exec says. If two
     // entries run the same command and one wants a terminal, it gets one.
     if let Some(app) = apps.iter().find(|a| a.terminal) {
-        use std::os::unix::fs::PermissionsExt;
         let path = std::env::var_os("PATH").unwrap_or_default();
-        let runnable = |d: std::path::PathBuf| std::fs::metadata(d.join("xdg-terminal-exec")).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0);
-        if !std::env::split_paths(&path).any(runnable) {
+        if !std::env::split_paths(&path).any(|d| runnable(&d.join("xdg-terminal-exec"))) {
             return Err(format!("'{}' runs in a terminal, and there is no xdg-terminal-exec to open one", app.name));
         }
-        launch.arg("xdg-terminal-exec");
+        argv.push("xdg-terminal-exec");
     }
     let command = &with_accessibility(command);
-    let mut child = launch.args(["sh", "-c", command]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().map_err(|e| e.to_string())?;
+    argv.extend(["sh", "-c", command]);
+    spawn_detached(&apps[0].id, &apps[0].name, &argv)
+}
+
+fn runnable(file: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(file).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+}
+
+/// Starts a program that is not ours to keep: `setsid -f`, so it leaves our
+/// session, and with a user systemd also in a scope of its own. setsid does not
+/// leave our cgroup, and systemd stops a unit by its cgroup: run as a service,
+/// a restart of the shell took every app it had launched along with it.
+pub(crate) fn spawn_detached(id: &str, name: &str, argv: &[&str]) -> Result<(), String> {
+    let scope = scope_prefix(id, name, user_systemd(std::env::var_os("PATH").as_deref(), std::env::var_os("XDG_RUNTIME_DIR").as_deref()));
+    let argv: Vec<String> = argv.iter().map(|a| a.to_string()).collect();
+    let (mut child, scoped) = match start(&scope, &argv) {
+        Ok(child) => (child, !scope.is_empty()),
+        Err(e) if !scope.is_empty() => {
+            eprintln!("apps.launch · systemd-run could not start ({e}): launched without a scope of its own");
+            (start(&[], &argv).map_err(|e| e.to_string())?, false)
+        }
+        Err(e) => return Err(e.to_string()),
+    };
     std::thread::spawn(move || {
-        let _ = child.wait();
+        let code = child.wait().ok().and_then(|s| s.code());
+        if let Some(note) = relaunch_note(scoped, code) {
+            eprintln!("{note}");
+            if let Ok(mut c) = start(&[], &argv) {
+                let _ = c.wait();
+            }
+        }
     });
     Ok(())
+}
+
+/// What to say when a launch has to be made again without its scope, or nothing.
+/// `setsid -f` answers 0 as soon as it has forked, whatever the program does: a
+/// failure in a scope is systemd-run's (no manager behind the socket, a name it
+/// refuses), and the program has not started. It is said, because without the
+/// scope the app goes again with a restart of the shell's unit.
+fn relaunch_note(scoped: bool, code: Option<i32>) -> Option<String> {
+    if !scoped || code == Some(0) {
+        return None;
+    }
+    let code = code.map_or("a signal".to_owned(), |c| format!("exit {c}"));
+    Some(format!("apps.launch · systemd-run failed ({code}): launched without a scope of its own"))
+}
+
+/// `setsid -f <argv>`, after the scope's `systemd-run … --` if there is one.
+fn start(prefix: &[String], argv: &[String]) -> std::io::Result<std::process::Child> {
+    use std::process::{Command, Stdio};
+    let mut c = Command::new(prefix.first().map_or("setsid", String::as_str));
+    crate::child_env(&mut c);
+    c.args(prefix.iter().skip(1)).args(if prefix.is_empty() { &["-f"][..] } else { &["setsid", "-f"][..] }).args(argv);
+    c.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn()
+}
+
+/// systemd-run is there, and so is the user's manager to give the scope.
+fn user_systemd(path: Option<&std::ffi::OsStr>, runtime_dir: Option<&std::ffi::OsStr>) -> bool {
+    let (Some(path), Some(runtime_dir)) = (path, runtime_dir) else { return false };
+    std::path::Path::new(runtime_dir).join("systemd/private").exists() && std::env::split_paths(path).any(|d| runnable(&d.join("systemd-run")))
+}
+
+/// `systemd-run … --` with the unit name systemd's desktop conventions give an
+/// app: `app-<launcher>-<id>-<random>.scope`, in `app.slice`. Nothing without a
+/// user systemd.
+fn scope_prefix(id: &str, name: &str, systemd: bool) -> Vec<String> {
+    if !systemd {
+        return Vec::new();
+    }
+    static LAUNCHES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let n = LAUNCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.subsec_nanos());
+    let unit = format!("--unit=app-pleamar-{}-{:x}{:x}{n:x}.scope", unit_escape(id), std::process::id(), nanos);
+    ["systemd-run", "--user", "--scope", "--quiet", "--collect", "--slice=app.slice", &format!("--description={name}"), &unit, "--"].map(String::from).to_vec()
+}
+
+/// systemd's escaping of a unit name: what is not a letter, digit, `:`, `_` or
+/// `.` (a leading `.` too) as `\xNN`, so `zen-browser` stays one part of the name.
+fn unit_escape(id: &str) -> String {
+    let mut out = String::new();
+    for (i, b) in id.bytes().enumerate() {
+        if b.is_ascii_alphanumeric() || b == b':' || b == b'_' || (b == b'.' && i > 0) {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("\\x{b:02x}"));
+        }
+    }
+    out
 }
 
 /// Launchers of Electron apps that are scripts: the program they start is found
@@ -263,6 +343,61 @@ fn with_accessibility(command: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unit_names_are_escaped_like_systemd() {
+        assert_eq!(unit_escape("org.gnome.Calculator"), "org.gnome.Calculator");
+        assert_eq!(unit_escape("zen-browser"), r"zen\x2dbrowser");
+        assert_eq!(unit_escape("a b"), r"a\x20b");
+        assert_eq!(unit_escape("é"), r"\xc3\xa9");
+        assert_eq!(unit_escape(".hidden"), r"\x2ehidden");
+    }
+
+    #[test]
+    fn scope_prefix_is_empty_without_user_systemd() {
+        assert!(scope_prefix("zen", "Zen Browser", false).is_empty());
+        let p = scope_prefix("zen-browser", "Zen Browser", true);
+        assert_eq!(p[..7], ["systemd-run", "--user", "--scope", "--quiet", "--collect", "--slice=app.slice", "--description=Zen Browser"]);
+        assert!(p[7].starts_with(r"--unit=app-pleamar-zen\x2dbrowser-") && p[7].ends_with(".scope"), "{}", p[7]);
+        assert_eq!(p.last().unwrap(), "--");
+    }
+
+    #[test]
+    fn only_a_failed_scope_is_launched_again_and_said() {
+        let again = relaunch_note(true, Some(1)).expect("a failed systemd-run launches it without the scope");
+        assert!(again.contains("systemd-run") && again.contains("exit 1"), "{again}");
+        assert_eq!(relaunch_note(true, Some(0)), None);
+        // Without a scope a failure is setsid's own: starting it again would not help.
+        assert_eq!(relaunch_note(false, Some(1)), None);
+        assert!(relaunch_note(true, None).is_some());
+    }
+
+    #[test]
+    fn two_launches_get_two_units() {
+        assert_ne!(scope_prefix("zen", "Zen", true)[7], scope_prefix("zen", "Zen", true)[7]);
+    }
+
+    #[test]
+    fn user_systemd_needs_the_program_and_the_manager() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("pleamar-systemd-{}", std::process::id()));
+        let (bin, run) = (dir.join("bin"), dir.join("run"));
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::create_dir_all(run.join("systemd")).unwrap();
+        let program = bin.join("systemd-run");
+        std::fs::write(&program, "#!/bin/sh\n").unwrap();
+        let (path, runtime) = (bin.as_os_str(), run.as_os_str());
+        // Not runnable yet, and no manager's socket yet.
+        assert!(!user_systemd(Some(path), Some(runtime)));
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(!user_systemd(Some(path), Some(runtime)));
+        std::fs::write(run.join("systemd/private"), "").unwrap();
+        assert!(user_systemd(Some(path), Some(runtime)));
+        assert!(!user_systemd(None, Some(runtime)));
+        assert!(!user_systemd(Some(path), None));
+        assert!(!user_systemd(Some(runtime), Some(runtime)));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn installing_or_removing_an_app_changes_the_signature() {
