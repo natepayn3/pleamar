@@ -1,0 +1,12 @@
+// expect: error «has to be all of the loop's body»
+scene ZInForBeside {
+    surface { size: 300, 120; anchor: center }
+    model cards max 4 { label: text; z: number; x: number }
+    for c in cards {
+        box { from: 20 + c.x, 10; size: 120, 6; color: #ffffff }
+        group {
+            z: c.z
+            box { from: 20 + c.x, 20; size: 120, 80; corner: 8; color: #4a7a4a }
+        }
+    }
+}

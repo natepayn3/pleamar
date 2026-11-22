@@ -685,6 +685,17 @@ mod tests {
         props
     }
 
+    /// pleamar#169: a row's presence goes with its `z:` group when the groups are sorted.
+    #[test]
+    fn the_z_group_of_a_row_of_a_for_takes_its_presence_with_it() {
+        let (scene, _) = super::read_file(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/z-in-for.plm")).unwrap();
+        assert_eq!(scene.zblocks.len(), 4, "one group per slot of the model");
+        for b in &scene.zblocks {
+            assert!(matches!(scene.instrs[b.range.start], crate::scene::Instr::Opacity(Some(_))), "starts at the row's presence: {:?}", b.range);
+            assert!(matches!(scene.instrs[b.range.end - 1], crate::scene::Instr::Opacity(None)), "ends where it is let go: {:?}", b.range);
+        }
+    }
+
     #[test]
     fn a_page_included_with_while_owns_its_part_of_each_list() {
         let (scene, _) = super::read_file(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/include-while.plm")).unwrap();

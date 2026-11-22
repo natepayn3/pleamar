@@ -1,0 +1,15 @@
+// expect: ok
+// `z:` on the group of each row of a `for` over a model (#169): the rows are sorted by `z`, and each one
+// keeps its own presence, so a row removed leaves, and the one that stays is drawn.
+scene ZInFor {
+    surface { size: 300, 120; anchor: center }
+    model cards max 4 { label: text; z: number; x: number }
+    box { from: 0, 0; size: 300, 120; color: #202020 }
+    for c in cards {
+        group {
+            z: c.z
+            box { from: 20 + c.x, 20; size: 120, 80; corner: 8; color: #4a7a4a }
+            text c.label { at: 30 + c.x, 60; anchor: left center; size: 14; color: #ffffff }
+        }
+    }
+}

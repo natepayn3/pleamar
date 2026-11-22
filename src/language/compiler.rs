@@ -9320,9 +9320,25 @@ impl<'a> Compiler<'a> {
             let is_present = env.visible.clone().unwrap();
             self.scopes.push(Rc::new(env));
             let from = self.candidates.len();
+            // A `z:` group of the body is sorted among the ones of the other iterations: the row's
+            // presence, painted round it, has to go with it, or each group is drawn under the presence
+            // of the row that took its place (#169: a removed row stayed on screen and the next one went).
+            let (zb_from, zb_parent, before) = (self.e.zblocks.len(), *self.zparents.last().unwrap_or(&0), self.e.instrs.len());
             self.e.paint(Instr::Opacity(Some(is_present.clone())));
+            let body_start = self.e.instrs.len();
             self.group(n.body.as_deref().unwrap_or(&[]).iter());
+            let body_end = self.e.instrs.len();
             self.e.paint(Instr::Opacity(None));
+            for b in zb_from..self.e.zblocks.len() {
+                if self.e.zblocks[b].parent != zb_parent {
+                    continue;
+                }
+                if self.e.zblocks[b].range == (body_start..body_end) {
+                    self.e.zblocks[b].range = before..self.e.instrs.len();
+                } else {
+                    return Err(CompileError::at(n.line, n.col, "a group with `z:` in a `for` over a model has to be all of the loop's body: it is sorted among the ones of the other rows, and what is drawn beside it would stay where it was written, under another row's presence. Put what is beside it inside that group, or in its own `for`"));
+                }
+            }
             for c in &mut self.candidates[from..] {
                 c.visible = Some(match c.visible.take() { Some(v) => v * is_present.clone(), None => is_present.clone() });
             }

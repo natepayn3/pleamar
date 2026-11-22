@@ -1147,7 +1147,7 @@ where two overlap, the press goes to the one drawn on top. It is how windows
 stack —the one you touch comes forward: `z: stamp.$i` with a fact the press
 bumps— and it moves nothing else: what has no `z:` stays where it was
 written. A group with `z:` inside another one with `z:` is an error: only one
-level is sorted.
+level is sorted. In a `for` over a model the group with `z:` has to be all of the loop's body (each row's presence goes with it when the rows are sorted); what is beside it goes inside the group, or in a `for` of its own.
 
 ### 8.2. Effects on a group
 
