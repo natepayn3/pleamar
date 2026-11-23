@@ -696,6 +696,13 @@ mod tests {
         }
     }
 
+    /// `win.dnd` is a fact of the windows: a scene reads it to know that a program drags something.
+    #[test]
+    fn the_scene_can_read_that_a_program_is_dragging() {
+        let (scene, _) = super::read_file(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/window-dnd.plm")).unwrap();
+        assert!(scene.facts.iter().any(|f| f.0 == "win.dnd"), "the windows declare win.dnd");
+    }
+
     #[test]
     fn a_page_included_with_while_owns_its_part_of_each_list() {
         let (scene, _) = super::read_file(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/include-while.plm")).unwrap();

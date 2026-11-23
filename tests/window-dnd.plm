@@ -1,0 +1,13 @@
+// expect: ok
+// A program drags something (a file out of a window): `win.dnd` is 1 meanwhile. The scene raises the window
+// the pointer lingers on for a while, as macOS does, and a hint shows that a drag is on.
+scene Dnd {
+    surface { size: 400, 300 }
+    windows win max 2
+    fact linger = 0
+    repeat i in 0..2 {
+        window win.$i { at: 10 + 190 * i, 10; size: 180, 200; show: win.$i.open }
+        zone box over.$i { at: 10 + 190 * i, 10; size: 180, 200; active: win.dnd > 0.5 and win.$i.open }
+    }
+    box { from: 0, 280; size: 400, 20; color: #4a7a4a; show: win.dnd > 0.5 }
+}

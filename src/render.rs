@@ -2060,6 +2060,7 @@ pub fn run(
                             nest_dragging = yes;
                             nest_buttons.clear();
                             nest_grab = None;
+                            nest_fact(&scene, &mut facts, &to_logic, &format!("{name}.dnd"), if yes { 1.0 } else { 0.0 });
                         }
                         NestEvent::Pick(what) => nest_fact(&scene, &mut facts, &to_logic, &format!("{name}.picking"), what as f32),
                         // A buffer a window is still showing is kept until it shows

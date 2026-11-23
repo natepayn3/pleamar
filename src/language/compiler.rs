@@ -8877,6 +8877,9 @@ impl<'a> Compiler<'a> {
         self.texts.insert(full, id);
         // What the compositor asks the scene to choose: 1 a monitor, 2 a window, 3 either.
         fact(self, format!("{name}.picking"), 0.0, false);
+        // 1 while a program drags something (a file out of a window): the scene can raise what the pointer
+        // lingers on, or open an app in the dock, as macOS does.
+        fact(self, format!("{name}.dnd"), 0.0, false);
         let full = format!("{name}.socket");
         let id = self.e.live_text(interned(&full), "");
         self.texts.insert(full, id);

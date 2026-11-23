@@ -1615,6 +1615,7 @@ reloads on save while the programs in it keep running.
 | `win.reserved.$s.top` · `.right` · `.bottom` · `.left` | what other programs' bars keep on monitor `s` at that edge, in pixels (layer-shell's exclusive zones): lay the windows out around it |
 | `win.order.$p` | which slot is at each place among the ones shown: `win.order.0` leads |
 | `win.socket` | where programs connect |
+| `win.dnd` | 1 while a program is dragging something (a file out of a window), 0 otherwise: with `mouse` and a `fact` that counts the time, the scene can raise the window the pointer lingers on or open the dock's app under it, as macOS does with a drag (spring-loading) |
 | `win.picking` | what the compositor asks the scene to choose, 0 while it asks nothing: 1 a monitor, 2 a window, 3 either (a program wants to share the screen). The scene draws its chooser and answers with `pick` |
 
 `window win.$i { at: x, y; size: w, h }` draws that slot's window in that box.
