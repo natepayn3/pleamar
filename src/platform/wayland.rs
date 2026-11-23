@@ -1854,6 +1854,11 @@ struct Locks {
     engaged: Mutex<Option<Engaged>>,
     /// For the plain covers of the monitors the scene is not on.
     shm: Option<WlShm>,
+    /// What a face needs to be handed to the render outside a configure (a
+    /// cover that becomes the scene: see `promote_first_cover`).
+    to_render: Sender<ToRender>,
+    cursors: Arc<Mutex<Option<WpCursorShapeDeviceV1>>>,
+    serial: Arc<AtomicU32>,
 }
 
 struct Engaged {
@@ -1971,18 +1976,49 @@ fn lock_face(c: &Locks, lock: &smithay_client_toolkit::session_lock::SessionLock
         None if c.shm.is_none() => first.clone(),
         None => return LockFace { copy: None, id, pending: None, viewport: None, _fractional_scale: None, name: name.to_string(), mhz, view_origin: (-1e7, -1e7), cover: Some(None), output: output.clone(), surface },
     };
-    let viewport = c.viewporter.as_ref().map(|v| v.get_viewport(surface.wl_surface(), &c.qh, Silent));
-    let fractional_scale = c.fractional_scales.as_ref().map(|m| m.get_fractional_scale(surface.wl_surface(), &c.qh, ScaleFor(id)));
+    let (viewport, fractional_scale, paints) = lock_scene_parts(c, surface.wl_surface(), id);
+    let origin = copy.origin;
+    LockFace { copy: Some(copy), id, pending: paints, viewport, _fractional_scale: fractional_scale, name: name.to_string(), mhz, view_origin: origin, cover: None, output: output.clone(), surface }
+}
+
+/// What a face that shows the scene paints with, on its surface: its viewport, its
+/// fractional scale and the surface the render presents to.
+fn lock_scene_parts(c: &Locks, wl: &wl_surface::WlSurface, id: u32) -> (Option<WpViewport>, Option<WpFractionalScaleV1>, Option<wgpu::Surface<'static>>) {
+    let viewport = c.viewporter.as_ref().map(|v| v.get_viewport(wl, &c.qh, Silent));
+    let fractional_scale = c.fractional_scales.as_ref().map(|m| m.get_fractional_scale(wl, &c.qh, ScaleFor(id)));
     let paints = unsafe {
         c.instance
             .create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
                 raw_display_handle: Some(RawDisplayHandle::Wayland(WaylandDisplayHandle::new(NonNull::new(c.connection.backend().display_ptr() as *mut _).unwrap()))),
-                raw_window_handle: RawWindowHandle::Wayland(WaylandWindowHandle::new(NonNull::new(surface.wl_surface().id().as_ptr() as *mut _).unwrap())),
+                raw_window_handle: RawWindowHandle::Wayland(WaylandWindowHandle::new(NonNull::new(wl.id().as_ptr() as *mut _).unwrap())),
             })
             .ok()
     };
-    let origin = copy.origin;
-    LockFace { copy: Some(copy), id, pending: paints, viewport, _fractional_scale: fractional_scale, name: name.to_string(), mhz, view_origin: origin, cover: None, output: output.clone(), surface }
+    (viewport, fractional_scale, paints)
+}
+
+/// A face that shows the scene, configured at `size`: placed (its box centred on its
+/// monitor) and handed to the render, once, with the surface it presents to.
+fn lock_face_to_render(c: &Locks, face: &mut LockFace, size: (u32, u32)) {
+    let (which, bounds, origin) = face.copy.as_ref().map_or((0, (0, 0), (0.0, 0.0)), |k| (k.which, k.bounds, k.origin));
+    if let Some(v) = &face.viewport {
+        v.set_destination(size.0 as i32, size.1 as i32);
+    }
+    // Its box, centred on THIS monitor: what's left over around it is also
+    // seen, so the background is painted large and each monitor shows its own part.
+    face.view_origin = (origin.0 - (size.0 as f32 - bounds.0 as f32) / 2.0, origin.1 - (size.1 as f32 - bounds.1 as f32) / 2.0);
+    if let Some(paints) = face.pending.take() {
+        let _ = c.to_render.send(ToRender::Sheet(Box::new(gpu::NewSheet {
+            id: face.id,
+            target: gpu::Target::Surface(paints),
+            window: Box::new(WaylandWindow { wl: face.surface.wl_surface().clone(), compositor: c.compositor.clone(), cursors: c.cursors.clone(), serial: c.serial.clone(), layer: None, toplevel: None, qh: c.qh.clone(), id: face.id, effect: Mutex::new(None), backdrop: None, shown: Default::default(), viewport: face.viewport.is_some(), frame: Default::default() }),
+            scale: 1.0,
+            size,
+            mhz: face.mhz,
+            name: format!("{} (lock)", face.name),
+            view: gpu::View { surface: which, popup: None, origin: face.view_origin, size: (size.0 as f32, size.1 as f32) },
+        })));
+    }
 }
 
 /// Which copy of the lock each monitor shows (`None`: a black cover): the first whose `screens:`
@@ -2047,18 +2083,31 @@ fn lock_face_for_new_monitor(output: &wl_output::WlOutput, name: &str, number: u
 const LOCK_GRACE: std::time::Duration = std::time::Duration::from_secs(4);
 
 /// If what there is are only black covers, the first of them becomes the scene.
-/// A cover paints nothing, so it can be destroyed here, and it is destroyed
-/// before the new face is made, since a monitor can only have one.
+/// It becomes it in place, on its own lock surface: a monitor may have only one,
+/// and destroying the cover to make another is not enough everywhere —smithay
+/// (pleamar-wm) remembers every monitor that ever had one, until the unlock, and
+/// ended the locker for the second one with `Output is already locked`—.
 fn promote_first_cover(c: &Locks, e: &mut Engaged) {
     if e.faces.is_empty() || !e.faces.iter().all(|f| f.cover.is_some()) {
         return;
     }
-    let cover = e.faces.remove(0);
-    let (output, name, mhz) = (cover.output.clone(), cover.name.clone(), cover.mhz);
-    drop(cover);
     let Some(first) = e.copies.first().cloned() else { return };
-    let face = lock_face(c, &e.lock, &output, &name, mhz, Some(first.clone()), &first);
-    e.faces.insert(0, face);
+    let face = &mut e.faces[0];
+    let (viewport, fractional_scale, paints) = lock_scene_parts(c, face.surface.wl_surface(), face.id);
+    face.viewport = viewport;
+    face._fractional_scale = fractional_scale;
+    face.pending = paints;
+    face.view_origin = first.origin;
+    face.copy = Some(first);
+    // The black buffer goes (what it showed stays until the render's first frame
+    // replaces it). Configured already, the face is handed to the render now: no
+    // other configure need come. If not, its first configure does it.
+    if let Some((pool, buffer, _fd, size)) = face.cover.take().flatten() {
+        buffer.destroy();
+        pool.destroy();
+        lock_face_to_render(c, face, size);
+    }
+    let name = face.name.clone();
     let _ = c.connection.flush();
     println!("lock   · {name} shows the lock: the monitors it was meant for are not here");
 }
@@ -2645,6 +2694,9 @@ pub fn run_event_loop(wanted: Vec<Surface>, extra_height: u32, instance: wgpu::I
         monitors: Mutex::default(),
         engaged: Mutex::default(),
         shm: globals.bind::<WlShm, _, _>(&qh, 1..=1, Silent).ok(),
+        to_render: state.to_render.clone(),
+        cursors: state.cursors.clone(),
+        serial: state.serial.clone(),
     });
     if state.viewporter.is_none() || state.fractional_scales.is_none() {
         eprintln!("warning: the compositor gives no fractional scale; it will paint at whatever whole scale it says");
@@ -2782,8 +2834,6 @@ impl smithay_client_toolkit::session_lock::SessionLockHandler for State {
         let mut engaged = c.engaged.lock().unwrap();
         let Some(e) = engaged.as_mut() else { return };
         let Some(face) = e.faces.iter_mut().find(|k| k.surface.wl_surface() == surface.wl_surface()) else { return };
-        // Each face shows its own copy (`screens: each`): its place in the plane and its box.
-        let (which, bounds, origin) = face.copy.as_ref().map_or((0, (0, 0), (0.0, 0.0)), |k| (k.which, k.bounds, k.origin));
         let size = conf.new_size;
         // A cover: black, as big as its monitor. Zeroed memory is black in XRGB.
         if let (Some(cover), Some(shm)) = (face.cover.as_mut(), c.shm.as_ref()) {
@@ -2807,24 +2857,7 @@ impl smithay_client_toolkit::session_lock::SessionLockHandler for State {
             }
             return;
         }
-        if let Some(v) = &face.viewport {
-            v.set_destination(size.0 as i32, size.1 as i32);
-        }
-        // Its box, centred on THIS monitor: what's left over around it is also
-        // seen, so the background is painted large and each monitor shows its own part.
-        face.view_origin = (origin.0 - (size.0 as f32 - bounds.0 as f32) / 2.0, origin.1 - (size.1 as f32 - bounds.1 as f32) / 2.0);
-        if let Some(paints) = face.pending.take() {
-            let _ = self.to_render.send(ToRender::Sheet(Box::new(gpu::NewSheet {
-                id: face.id,
-                target: gpu::Target::Surface(paints),
-                window: Box::new(WaylandWindow { wl: face.surface.wl_surface().clone(), compositor: self.compositor.clone(), cursors: self.cursors.clone(), serial: self.serial.clone(), layer: None, toplevel: None, qh: self.qh.clone(), id: face.id, effect: Mutex::new(None), backdrop: None, shown: Default::default(), viewport: face.viewport.is_some(), frame: Default::default() }),
-                scale: 1.0,
-                size,
-                mhz: face.mhz,
-                name: format!("{} (lock)", face.name),
-                view: gpu::View { surface: which, popup: None, origin: face.view_origin, size: (size.0 as f32, size.1 as f32) },
-            })));
-        }
+        lock_face_to_render(c, face, size);
     }
 }
 
