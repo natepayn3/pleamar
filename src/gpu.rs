@@ -149,6 +149,8 @@ pub struct DrawList {
     /// The strips of each glass shape, at the origin, keyed by what makes it
     /// what it is except where it is: while it only moves, they are not searched again.
     glass_cache: std::collections::HashMap<([u32; 12], u64), (Vec<[f32; 4]>, bool)>,
+    /// The strips of the necks where a glass body's shapes melt, kept by the shapes and how much they melt.
+    neck_cache: std::collections::HashMap<u64, (Vec<[f32; 4]>, bool)>,
     /// The windows of the scene's compositor that have an image: for each slot,
     /// where it is in the windows' texture (its layer, and the corners of the
     /// window itself inside it). The render sets it before composing.
@@ -832,6 +834,8 @@ struct OpenBody {
     /// Its shapes as they are, to know on the CPU where its edge goes: the
     /// glass needs it, since it asks the compositor to blur exactly there.
     flats: Vec<crate::shapes::FlatShape>,
+    /// How much each of them melts into the ones before it (`blend:`), as the shader reads it.
+    blends: Vec<f32>,
 }
 
 /// What a text says right now. Without copying anything when it does not have to: a
@@ -983,6 +987,104 @@ const STRIP: f32 = 2.0;
 ///
 /// At the origin because what almost always changes about a shape is where it
 /// is: that way, a little ball that travels is not measured again, only shifted.
+/// What the shader's `smooth_min` says: the distance of two shapes that melt by `k`.
+fn smooth_min(a: f32, b: f32, k: f32) -> f32 {
+    const FAR: f32 = 1e6;
+    if k < 0.5 || a > FAR * 0.5 || b > FAR * 0.5 {
+        return a.min(b);
+    }
+    let h = (k - (a - b).abs()).max(0.0) / k;
+    a.min(b) - h * h * k * 0.25
+}
+
+fn neck_key(flats: &[crate::shapes::FlatShape], blends: &[f32]) -> u64 {
+    use std::hash::Hasher;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for (p, k) in flats.iter().zip(blends) {
+        h.write_u8(p.kind);
+        for v in [p.cx, p.cy, p.mx, p.my, p.radius, p.rotation, p.ex, p.ey, p.stroke, p.affine.m[0], p.affine.m[1], p.affine.m[2], p.affine.m[3], p.affine.t[0], p.affine.t[1], *k] {
+            h.write_u32(v.to_bits());
+        }
+    }
+    h.finish() | 1
+}
+
+/// The strips of the necks of a body: the pixels its shapes cover only once they are melted (the
+/// shader folds `smooth_min` over the shapes, each with its own `blend`), which none of the shapes
+/// cover by itself. Looked for only where a shape and the ones before it are both within the
+/// reach of its `blend`; the rest of the body is the shapes' own strips. Paths are not looked at
+/// (their points are somewhere else), and neither is a body where that place is huge.
+fn blend_necks(flats: &[crate::shapes::FlatShape], blends: &[f32]) -> Vec<[f32; 4]> {
+    // The most it is worth looking at: a body of a few shapes and a join of a few thousand pixels, once (it is kept
+    // while the shapes do not change). A bigger one keeps the shapes' own strips, as before.
+    const MOST_PIXELS: f32 = 60_000.0;
+    const MOST_SHAPES: usize = 16;
+    if flats.len() < 2 || flats.len() > MOST_SHAPES || flats.len() != blends.len() || flats.iter().any(|p| p.kind == 4) {
+        return Vec::new();
+    }
+    let bounds: Vec<Option<[f32; 4]>> = flats.iter().map(|p| p.bounds()).collect();
+    let grow = |b: [f32; 4], k: f32| [b[0] - k, b[1] - k, b[2] + k, b[3] + k];
+    let mut before: Option<[f32; 4]> = None;
+    let mut place: Option<[f32; 4]> = None;
+    for (i, b) in bounds.iter().enumerate() {
+        let Some(b) = *b else { continue };
+        if i > 0 && blends[i] >= 0.5 {
+            if let Some(prev) = before {
+                let (a, c) = (grow(prev, blends[i]), grow(b, blends[i]));
+                let r = [a[0].max(c[0]), a[1].max(c[1]), a[2].min(c[2]), a[3].min(c[3])];
+                if r[2] > r[0] && r[3] > r[1] {
+                    place = Some(place.map_or(r, |q| [q[0].min(r[0]), q[1].min(r[1]), q[2].max(r[2]), q[3].max(r[3])]));
+                }
+            }
+        }
+        before = Some(before.map_or(b, |q| [q[0].min(b[0]), q[1].min(b[1]), q[2].max(b[2]), q[3].max(b[3])]));
+    }
+    let Some(place) = place else { return Vec::new() };
+    let (x0, y0, x1, y1) = (place[0].floor(), place[1].floor(), place[2].ceil(), place[3].ceil());
+    if (x1 - x0) * (y1 - y0) > MOST_PIXELS {
+        return Vec::new();
+    }
+    // Each shape only counts where it can reach: past its box and the reach of the melt it has no say.
+    let reach = blends.iter().fold(0.0f32, |m, k| m.max(*k));
+    let near: Vec<Option<[f32; 4]>> = bounds.iter().map(|b| b.map(|b| grow(b, reach + 1.0))).collect();
+    let mut strips: Vec<[f32; 4]> = Vec::new();
+    let mut y = y0;
+    while y < y1 {
+        let mut run: Option<f32> = None;
+        let mut x = x0;
+        while x <= x1 {
+            let neck = x < x1 && {
+                let (px, py) = (x + 0.5, y + 0.5);
+                let (mut folded, mut alone) = (1e6f32, f32::MAX);
+                for ((p, k), n) in flats.iter().zip(blends).zip(&near) {
+                    if !n.is_some_and(|n| px >= n[0] && px <= n[2] && py >= n[1] && py <= n[3]) {
+                        continue;
+                    }
+                    let d = p.distance(px, py);
+                    alone = alone.min(d);
+                    folded = smooth_min(folded, d, *k);
+                }
+                folded < 0.0 && alone >= 0.0 && alone != f32::MAX
+            };
+            match (neck, run) {
+                (true, None) => run = Some(x),
+                (false, Some(from)) => {
+                    // The same run on the row above is the same strip, taller.
+                    match strips.last_mut() {
+                        Some(last) if last[0] == from && last[2] == x && last[3] == y => last[3] = y + 1.0,
+                        _ => strips.push([from, y, x, y + 1.0]),
+                    }
+                    run = None;
+                }
+                _ => {}
+            }
+            x += 1.0;
+        }
+        y += 1.0;
+    }
+    strips
+}
+
 fn strips_of(p: &crate::shapes::FlatShape, points: &[f32]) -> Vec<[f32; 4]> {
     let mut strips: Vec<[f32; 4]> = Vec::new();
     let Some(bounds) = p.bounds() else { return strips };
@@ -2054,8 +2156,9 @@ impl DrawList {
 
     /// That the compositor blurs what is behind these shapes: their strips,
     /// each one separately —the union of their silhouettes is that of the
-    /// body, minus the neck where two blend, which is little— and clipped.
-    fn request_glass(&mut self, flats: &[crate::shapes::FlatShape], clips: &[(usize, [f32; 4])], lens: bool) {
+    /// body, minus the neck where two blend, which has its own strips below
+    /// (`blend_necks`, #170)— and clipped.
+    fn request_glass(&mut self, flats: &[crate::shapes::FlatShape], blends: &[f32], clips: &[(usize, [f32; 4])], lens: bool) {
         let mut cut = [f32::MIN, f32::MIN, f32::MAX, f32::MAX];
         for (_, r) in clips {
             cut = [cut[0].max(r[0]), cut[1].max(r[1]), cut[2].min(r[2]), cut[3].min(r[3])];
@@ -2097,6 +2200,17 @@ impl DrawList {
                 cached.0.clone()
             };
             self.glass_regions.extend(strips.into_iter().map(|f| [(f[0] + ox).max(cut[0]), (f[1] + oy).max(cut[1]), (f[2] + ox).min(cut[2]), (f[3] + oy).min(cut[3])]).filter(|f| f[2] > f[0] && f[3] > f[1]).map(|f| (f, if lens { Behind::Lens } else { Behind::Blur })));
+        }
+        // Where two shapes of the body melt the body is more than the shapes: the neck between them, which
+        // the shader draws and the strips above do not reach (the wallpaper stayed sharp in it).
+        if blends.len() == flats.len() && flats.len() > 1 && blends[1..].iter().any(|k| *k >= 0.5) {
+            let key = neck_key(flats, blends);
+            let necks = {
+                let cached = self.neck_cache.entry(key).or_insert_with(|| (blend_necks(flats, blends), false));
+                cached.1 = true;
+                cached.0.clone()
+            };
+            self.glass_regions.extend(necks.into_iter().map(|f| [f[0].max(cut[0]), f[1].max(cut[1]), f[2].min(cut[2]), f[3].min(cut[3])]).filter(|f| f[2] > f[0] && f[3] > f[1]).map(|f| (f, if lens { Behind::Lens } else { Behind::Blur })));
         }
     }
 
@@ -2890,7 +3004,7 @@ impl DrawList {
                 }
                 _ if hidden => {}
                 Instr::Group { shadow } => {
-                    body = Some(OpenBody { first: self.shapes.len() / PER_SHAPE, n: 0, bounds: None, slack: 0.0, shadow: shadow.clone(), flats: Vec::new() })
+                    body = Some(OpenBody { first: self.shapes.len() / PER_SHAPE, n: 0, bounds: None, slack: 0.0, shadow: shadow.clone(), flats: Vec::new(), blends: Vec::new() })
                 }
                 Instr::Shape { shape, fusion: blend } => {
                     let (mut p, k) = match c.seen {
@@ -2903,6 +3017,7 @@ impl DrawList {
                     self.push_shape(p, k);
                     if let Some(g) = &mut body {
                         g.flats.push(p);
+                        g.blends.push(k);
                         g.n += 1;
                         g.slack = g.slack.max(k * 0.5);
                         if let Some(b) = bounds {
@@ -2944,7 +3059,7 @@ impl DrawList {
                     let v = glass_spec.as_ref().map_or(0.0, |v| v.amount.eval(c));
                     let lens = glass_spec.as_ref().is_some_and(|v| v.lens.is_true(c));
                     if v * a * layered > GLASS_VISIBLE {
-                        self.request_glass(&g.flats, &clips, lens);
+                        self.request_glass(&g.flats, &g.blends, &clips, lens);
                         // Any glass: one that bends takes what the scene painted under it as what
                         // is behind, and one that does not frosts it (a veil, see `fs_veil_cut`).
                         self.glass_marks.push(self.element_count() as u32);
@@ -3004,7 +3119,7 @@ impl DrawList {
                     let v = glass_spec.as_ref().map_or(0.0, |v| v.amount.eval(c).clamp(0.0, 1.0));
                     let lens = glass_spec.as_ref().is_some_and(|v| v.lens.is_true(c));
                     if v * a * layered > GLASS_VISIBLE {
-                        self.request_glass(&[p], &clips, lens);
+                        self.request_glass(&[p], &[], &clips, lens);
                         // Any glass: one that bends takes what the scene painted under it as what
                         // is behind, and one that does not frosts it (a veil, see `fs_veil_cut`).
                         self.glass_marks.push(self.element_count() as u32);
@@ -3700,6 +3815,7 @@ impl DrawList {
         // The silhouettes nobody has used this frame are forgotten; the others
         // start the count again.
         self.glass_cache.retain(|_, (_, used)| std::mem::take(used));
+        self.neck_cache.retain(|_, (_, used)| std::mem::take(used));
         self.share_layers();
         if hud {
             // The instruments take the bottom strip, which was added for them.
@@ -6914,6 +7030,42 @@ mod tests {
         assert!(merge_cuts([[5.0, 5.0, 5.0, 9.0]].into_iter()).is_empty());
     }
 
+    /// pleamar#170: where a panel melts into a strip, the body is more than its two shapes, and the
+    /// compositor has to blur that too, and no more than that.
+    #[test]
+    fn the_neck_where_two_shapes_melt_is_asked_to_be_blurred() {
+        // The scene of the issue, on a 1000 × 600 surface: a strip along the bottom edge, a panel of
+        // 360 × 236 with corners of 20 that melts into it by 26.
+        let boxed = |cx: f32, cy: f32, hx: f32, hy: f32, r: f32| FlatShape { kind: 1, cx, cy, mx: hx, my: hy, radius: r, rotation: 0.0, ex: 1.0, ey: 1.0, stroke: 0.0, affine: Affine::IDENTITY };
+        let flats = [boxed(500.0, 600.0, 500.0, 8.0, 0.0), boxed(500.0, 510.0, 180.0, 118.0, 20.0)];
+        let necks = blend_necks(&flats, &[0.0, 26.0]);
+        assert!(!necks.is_empty(), "the join has strips");
+        let melted = |x: f32, y: f32| flats.iter().zip([0.0f32, 26.0]).fold(1e6f32, |d, (p, k)| smooth_min(d, p.distance(x, y), k));
+        let mut pixels = 0;
+        for s in &necks {
+            let mut y = s[1];
+            while y < s[3] {
+                let mut x = s[0];
+                while x < s[2] {
+                    pixels += 1;
+                    assert!(melted(x + 0.5, y + 0.5) < 0.0, "({x}, {y}) is inside the melted body");
+                    assert!(flats.iter().all(|p| p.distance(x + 0.5, y + 0.5) >= 0.0), "({x}, {y}) is in none of the shapes alone");
+                    x += 1.0;
+                }
+                y += 1.0;
+            }
+        }
+        assert!(pixels > 20, "the neck is some pixels, {pixels}");
+        // Not melted, no neck; and nothing for a single shape or for the other way round to ask.
+        assert!(blend_necks(&flats, &[0.0, 0.0]).is_empty());
+        assert!(blend_necks(&flats[..1], &[0.0]).is_empty());
+        // And a glass asks for them next to the shapes' own strips.
+        let mut d = DrawList::default();
+        d.request_glass(&flats, &[0.0, 26.0], &[], false);
+        let alone = { let mut e = DrawList::default(); e.request_glass(&flats, &[0.0, 0.0], &[], false); e.glass_regions.len() };
+        assert!(d.glass_regions.len() > alone, "{} regions against {alone} without the melt", d.glass_regions.len());
+    }
+
     /// A glass path's strips are kept by its points, not by where they sit in the
     /// list: the same stroke written after other points, or moved, is taken from
     /// the cache, shifted, and not measured again (#148).
@@ -6923,7 +7075,7 @@ mod tests {
         let stroke = [0.0f32, 0.0, 60.0, 40.0, 20.0, 110.0, 50.0, 120.0];
         let path = |first: usize, cx: f32| FlatShape { kind: 4, cx, cy: 80.0, mx: 0.0, my: 0.0, radius: (first / 2) as f32, rotation: 0.0, ex: 4.0, ey: 0.0, stroke: 14.0, affine: Affine::IDENTITY };
         d.points.extend_from_slice(&stroke);
-        d.request_glass(&[path(0, 40.0)], &[], false);
+        d.request_glass(&[path(0, 40.0)], &[], &[], false);
         let first: Vec<[f32; 4]> = d.glass_regions.iter().map(|r| r.0).collect();
         assert!(!first.is_empty(), "a stroke has strips");
         assert_eq!(d.glass_cache.len(), 1);
@@ -6932,19 +7084,19 @@ mod tests {
         d.points.clear();
         d.points.extend_from_slice(&[9.0; 6]);
         d.points.extend_from_slice(&stroke);
-        d.request_glass(&[path(6, 65.0)], &[], false);
+        d.request_glass(&[path(6, 65.0)], &[], &[], false);
         assert_eq!(d.glass_cache.len(), 1, "taken from the cache, not measured again");
         let moved: Vec<[f32; 4]> = d.glass_regions.iter().map(|r| r.0).collect();
         assert_eq!(moved, first.iter().map(|r| [r[0] + 25.0, r[1], r[2] + 25.0, r[3]]).collect::<Vec<_>>());
         // The same stroke a rounding away (what moving a path's `at:` leaves): the same entry.
         d.points.clear();
         d.points.extend(stroke.iter().map(|v| v + 1e-5));
-        d.request_glass(&[path(0, 40.3)], &[], false);
+        d.request_glass(&[path(0, 40.3)], &[], &[], false);
         assert_eq!(d.glass_cache.len(), 1, "a rounding apart is the same stroke");
         // Another stroke is another entry.
         d.points.clear();
         d.points.extend_from_slice(&[0.0, 0.0, 30.0, 10.0, 20.0, 50.0, 0.0, 70.0]);
-        d.request_glass(&[path(0, 40.0)], &[], false);
+        d.request_glass(&[path(0, 40.0)], &[], &[], false);
         assert_eq!(d.glass_cache.len(), 2);
     }
 
