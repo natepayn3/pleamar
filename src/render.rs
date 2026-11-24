@@ -5685,10 +5685,14 @@ pub fn run(
                 // With `rate:`, the scene decides the step and not the monitor: a bar
                 // that breathes does not need 165 frames per second, and painting them is what
                 // costs. Never faster than the screen, which would be no use.
+                let screen_mhz = mhz;
                 let mhz = match rate_now {
                     0 => mhz,
                     r => mhz.min(r as i32 * 1000),
                 };
+                // The scene asked for fewer frames than the screen gives: a capture that arrives
+                // meanwhile waits for the step too (see below).
+                let slowed = mhz < screen_mhz;
                 let period = Duration::from_secs_f64(1000.0 / mhz as f64);
                 // The clock gives the step: one deadline per period. The compositor's
                 // notice is no use as a metronome —Hyprland notifies when it composes,
@@ -5719,7 +5723,13 @@ pub fn run(
                             }
                             match rx.recv_timeout(left) {
                                 Ok(ToRender::Backdrop(d)) => {
-                                    if handle_backdrop(g, &mut sheets, d) {
+                                    // Not with a `rate:` below the screen's: every capture that
+                                    // came in was a frame of its own on top of the clock's, so a
+                                    // glass with something moving behind it painted as often as the
+                                    // compositor did whatever its scene asked (`rate: 60` on a
+                                    // 165 Hz screen gave 82 frames a second, and `rate: 55`, 78).
+                                    // What the capture changed is owed (`owe`), and is painted at the step.
+                                    if handle_backdrop(g, &mut sheets, d) && !slowed {
                                         next_frame = crate::clock::now() + period;
                                         break;
                                     }
